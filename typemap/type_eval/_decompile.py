@@ -97,6 +97,173 @@ def _same_span(a: ast.expr, b: ast.expr) -> bool:
     return sa == sb
 
 
+# ---------------------------------------------------------------------------
+# Shared opcode interpreter
+# ---------------------------------------------------------------------------
+
+
+def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
+    """Execute a stack-only opcode (no pc modification needed).
+
+    Handles all LOAD_*, BINARY_OP, BUILD_TUPLE/LIST, MAKE_FUNCTION,
+    LIST_EXTEND, LIST_APPEND, CALL_INTRINSIC_1, and no-ops.
+
+    Returns True if the opcode was handled, False otherwise.
+    """
+    op = instr.opname
+    arg = instr.arg
+    argval = instr.argval
+
+    if op == "LOAD_CONST":
+        stack.append(_set_pos(_const_to_ast(argval), instr))
+
+    elif op == "LOAD_SMALL_INT":
+        stack.append(_set_pos(ast.Constant(value=argval), instr))
+
+    elif op in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_FAST_BORROW"):
+        stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
+
+    elif op == "LOAD_DEREF":
+        if argval == "__classdict__":
+            stack.append(_CLASSDICT)
+        else:
+            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
+
+    elif op in ("LOAD_FROM_DICT_OR_GLOBALS", "LOAD_FROM_DICT_OR_DEREF"):
+        if stack and stack[-1] is _CLASSDICT:
+            stack.pop()
+        stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
+
+    elif op == "LOAD_ATTR":
+        obj = stack.pop()
+        stack.append(
+            _set_pos(
+                ast.Attribute(value=obj, attr=argval, ctx=ast.Load()),
+                instr,
+            )
+        )
+
+    elif op == "BINARY_OP":
+        if arg == _NB_SUBSCR:
+            slice_node = stack.pop()
+            value_node = stack.pop()
+            stack.append(
+                _set_pos(
+                    ast.Subscript(
+                        value=value_node, slice=slice_node, ctx=ast.Load()
+                    ),
+                    instr,
+                )
+            )
+        elif arg == _NB_OR:
+            right = stack.pop()
+            left = stack.pop()
+            stack.append(
+                _set_pos(
+                    ast.BinOp(left=left, op=ast.BitOr(), right=right),
+                    instr,
+                )
+            )
+        else:
+            raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
+
+    elif op == "BUILD_TUPLE":
+        n = argval
+        if n:
+            elts = stack[-n:]
+            del stack[-n:]
+        else:
+            elts = []
+        stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
+
+    elif op == "BUILD_LIST":
+        n = argval
+        if n:
+            elts = stack[-n:]
+            del stack[-n:]
+        else:
+            elts = []
+        stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
+
+    elif op == "MAKE_FUNCTION":
+        top = stack.pop()
+        # Keep listcomp code objects as markers for GET_ITER
+        if (
+            isinstance(top, ast.Constant)
+            and isinstance(top.value, types.CodeType)
+            and top.value.co_name == "<listcomp>"
+        ):
+            stack.append(top)
+        else:
+            stack.append(_set_pos(ast.Constant(value="<function>"), instr))
+
+    elif op == "LIST_EXTEND":
+        source = stack.pop()
+        target = stack[-argval]
+        assert isinstance(target, ast.List)
+        target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
+
+    elif op == "LIST_APPEND":
+        item = stack.pop()
+        target = stack[-argval]
+        assert isinstance(target, ast.List)
+        target.elts.append(item)
+
+    elif op == "CALL_INTRINSIC_1":
+        if arg == _INTRINSIC_LIST_TO_TUPLE:
+            list_node = stack.pop()
+            assert isinstance(list_node, ast.List)
+            stack.append(ast.Tuple(elts=list_node.elts, ctx=ast.Load()))
+        else:
+            raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
+
+    elif op in ("NOT_TAKEN", "PUSH_NULL"):
+        pass
+
+    else:
+        return False
+
+    return True
+
+
+def _handle_get_iter(
+    instructions: list[dis.Instruction],
+    offset_to_idx: dict[int, int],
+    pc: int,
+    stack: list[ast.expr],
+) -> int:
+    """Handle GET_ITER: pop iterable, dispatch to Pattern A or B.
+
+    Returns the new pc (advanced past the comprehension instructions).
+    """
+    iterable_node = stack.pop()
+    if (
+        stack
+        and isinstance(stack[-1], ast.Constant)
+        and isinstance(stack[-1].value, types.CodeType)
+    ):
+        # Pattern A: separate code object
+        code_marker = stack.pop()
+        comp = _decompile_listcomp_code(code_marker.value, iterable_node)
+        stack.append(comp)
+        # Skip the CALL instruction
+        while pc < len(instructions) and instructions[pc].opname != "CALL":
+            pc += 1
+        pc += 1  # skip CALL itself
+    else:
+        # Pattern B: inlined comprehension
+        comp, pc = _decompile_inline_comp(
+            instructions, offset_to_idx, pc, iterable_node
+        )
+        stack.append(comp)
+    return pc
+
+
+# ---------------------------------------------------------------------------
+# Comprehension decompilation
+# ---------------------------------------------------------------------------
+
+
 def _decompile_comp_body(
     instructions: list[dis.Instruction],
     offset_to_idx: dict[int, int],
@@ -121,8 +288,6 @@ def _decompile_comp_body(
     while pc < len(instructions):
         instr = instructions[pc]
         op = instr.opname
-        arg = instr.arg
-        argval = instr.argval
 
         if op == "LIST_APPEND":
             body = stack.pop()
@@ -165,54 +330,7 @@ def _decompile_comp_body(
 
         pc += 1
 
-        if op == "LOAD_CONST":
-            stack.append(_const_to_ast(argval))
-        elif op == "LOAD_SMALL_INT":
-            stack.append(ast.Constant(value=argval))
-        elif op in ("LOAD_GLOBAL", "LOAD_NAME"):
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
-        elif op in ("LOAD_FAST", "LOAD_FAST_BORROW"):
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
-        elif op == "LOAD_DEREF":
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
-        elif op in (
-            "LOAD_FROM_DICT_OR_GLOBALS",
-            "LOAD_FROM_DICT_OR_DEREF",
-        ):
-            if stack and stack[-1] is _CLASSDICT:
-                stack.pop()
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
-        elif op == "LOAD_ATTR":
-            obj = stack.pop()
-            stack.append(ast.Attribute(value=obj, attr=argval, ctx=ast.Load()))
-        elif op == "BINARY_OP":
-            if arg == _NB_SUBSCR:
-                s = stack.pop()
-                v = stack.pop()
-                stack.append(ast.Subscript(value=v, slice=s, ctx=ast.Load()))
-            elif arg == _NB_OR:
-                r = stack.pop()
-                lft = stack.pop()
-                stack.append(ast.BinOp(left=lft, op=ast.BitOr(), right=r))
-            else:
-                raise DecompileError(
-                    f"Unsupported BINARY_OP in listcomp: {arg}"
-                )
-        elif op == "BUILD_TUPLE":
-            n = argval
-            elts = stack[-n:] if n else []
-            if n:
-                del stack[-n:]
-            stack.append(ast.Tuple(elts=elts, ctx=ast.Load()))
-        elif op == "BUILD_LIST":
-            n = argval
-            elts = stack[-n:] if n else []
-            if n:
-                del stack[-n:]
-            stack.append(ast.List(elts=elts, ctx=ast.Load()))
-        elif op in ("NOT_TAKEN", "PUSH_NULL"):
-            pass
-        else:
+        if not _exec_stack_op(instr, stack):
             raise DecompileError(f"Unsupported opcode in listcomp body: {op}")
 
     raise DecompileError("LIST_APPEND not found in comprehension body")
@@ -332,6 +450,11 @@ def _decompile_inline_comp(
     return _build_listcomp(body, filters, var_name, iterable), pc
 
 
+# ---------------------------------------------------------------------------
+# Main bytecode drivers
+# ---------------------------------------------------------------------------
+
+
 def _decompile_bytecode(
     code: types.CodeType,
 ) -> dict[str, ast.expr]:
@@ -378,78 +501,8 @@ def _run(
         argval = instr.argval
         pc += 1
 
-        if op == "LOAD_CONST":
-            stack.append(_set_pos(_const_to_ast(argval), instr))
-
-        elif op == "LOAD_SMALL_INT":
-            stack.append(_set_pos(ast.Constant(value=argval), instr))
-
-        elif op in ("LOAD_GLOBAL", "LOAD_NAME"):
-            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
-
-        elif op == "LOAD_DEREF":
-            if argval == "__classdict__":
-                stack.append(_CLASSDICT)
-            else:
-                stack.append(
-                    _set_pos(ast.Name(id=argval, ctx=ast.Load()), instr)
-                )
-
-        elif op in ("LOAD_FROM_DICT_OR_GLOBALS", "LOAD_FROM_DICT_OR_DEREF"):
-            if stack and stack[-1] is _CLASSDICT:
-                stack.pop()
-            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
-
-        elif op == "LOAD_ATTR":
-            obj = stack.pop()
-            stack.append(
-                _set_pos(
-                    ast.Attribute(value=obj, attr=argval, ctx=ast.Load()),
-                    instr,
-                )
-            )
-
-        elif op == "BINARY_OP":
-            if arg == _NB_SUBSCR:
-                slice_node = stack.pop()
-                value_node = stack.pop()
-                stack.append(
-                    _set_pos(
-                        ast.Subscript(
-                            value=value_node, slice=slice_node, ctx=ast.Load()
-                        ),
-                        instr,
-                    )
-                )
-            elif arg == _NB_OR:
-                right = stack.pop()
-                left = stack.pop()
-                stack.append(
-                    _set_pos(
-                        ast.BinOp(left=left, op=ast.BitOr(), right=right),
-                        instr,
-                    )
-                )
-            else:
-                raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
-
-        elif op == "BUILD_TUPLE":
-            n = argval
-            if n:
-                elts = stack[-n:]
-                del stack[-n:]
-            else:
-                elts = []
-            stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
-
-        elif op == "BUILD_LIST":
-            n = argval
-            if n:
-                elts = stack[-n:]
-                del stack[-n:]
-            else:
-                elts = []
-            stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
+        if _exec_stack_op(instr, stack):
+            pass
 
         elif op == "BUILD_MAP":
             n = argval
@@ -476,64 +529,8 @@ def _run(
             assert isinstance(key_node.value, str)
             result[key_node.value] = val_node
 
-        elif op == "MAKE_FUNCTION":
-            top = stack.pop()
-            # Keep listcomp code objects as markers for GET_ITER
-            if (
-                isinstance(top, ast.Constant)
-                and isinstance(top.value, types.CodeType)
-                and top.value.co_name == "<listcomp>"
-            ):
-                stack.append(top)
-            else:
-                stack.append(_set_pos(ast.Constant(value="<function>"), instr))
-
         elif op == "GET_ITER":
-            # Comprehension: pop iterable, detect Pattern A vs B
-            iterable_node = stack.pop()
-            if (
-                stack
-                and isinstance(stack[-1], ast.Constant)
-                and isinstance(stack[-1].value, types.CodeType)
-            ):
-                # Pattern A: separate code object
-                code_marker = stack.pop()
-                comp = _decompile_listcomp_code(
-                    code_marker.value, iterable_node
-                )
-                stack.append(comp)
-                # Skip the CALL instruction
-                while (
-                    pc < len(instructions) and instructions[pc].opname != "CALL"
-                ):
-                    pc += 1
-                pc += 1  # skip CALL itself
-            else:
-                # Pattern B: inlined comprehension
-                comp, pc = _decompile_inline_comp(
-                    instructions, offset_to_idx, pc, iterable_node
-                )
-                stack.append(comp)
-
-        elif op == "LIST_EXTEND":
-            source = stack.pop()
-            target = stack[-argval]
-            assert isinstance(target, ast.List)
-            target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
-
-        elif op == "LIST_APPEND":
-            item = stack.pop()
-            target = stack[-argval]
-            assert isinstance(target, ast.List)
-            target.elts.append(item)
-
-        elif op == "CALL_INTRINSIC_1":
-            if arg == _INTRINSIC_LIST_TO_TUPLE:
-                list_node = stack.pop()
-                assert isinstance(list_node, ast.List)
-                stack.append(ast.Tuple(elts=list_node.elts, ctx=ast.Load()))
-            else:
-                raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
+            pc = _handle_get_iter(instructions, offset_to_idx, pc, stack)
 
         elif op == "TO_BOOL":
             # The test expression is on top of stack.  The next meaningful
@@ -617,13 +614,10 @@ def _run(
         elif op in (
             "RESUME",
             "COPY_FREE_VARS",
-            "NOT_TAKEN",
             "POP_JUMP_IF_FALSE",
-            "LOAD_FAST_BORROW",
             "COMPARE_OP",
             "LOAD_COMMON_CONSTANT",
             "RAISE_VARARGS",
-            "PUSH_NULL",
         ):
             pass
 
@@ -710,128 +704,16 @@ def _run_expr(
                 )
             continue
 
-        # Reuse the same opcode handling as _run
-        arg = instr.arg
-        argval = instr.argval
         pc += 1
 
-        if op == "LOAD_CONST":
-            stack.append(_set_pos(_const_to_ast(argval), instr))
-        elif op == "LOAD_SMALL_INT":
-            stack.append(_set_pos(ast.Constant(value=argval), instr))
-        elif op in ("LOAD_GLOBAL", "LOAD_NAME"):
-            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
-        elif op == "LOAD_DEREF":
-            if argval == "__classdict__":
-                stack.append(_CLASSDICT)
-            else:
-                stack.append(
-                    _set_pos(ast.Name(id=argval, ctx=ast.Load()), instr)
-                )
-        elif op in ("LOAD_FROM_DICT_OR_GLOBALS", "LOAD_FROM_DICT_OR_DEREF"):
-            if stack and stack[-1] is _CLASSDICT:
-                stack.pop()
-            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
-        elif op == "LOAD_ATTR":
-            obj = stack.pop()
-            stack.append(
-                _set_pos(
-                    ast.Attribute(value=obj, attr=argval, ctx=ast.Load()),
-                    instr,
-                )
-            )
-        elif op == "BINARY_OP":
-            if arg == _NB_SUBSCR:
-                s = stack.pop()
-                v = stack.pop()
-                stack.append(
-                    _set_pos(
-                        ast.Subscript(value=v, slice=s, ctx=ast.Load()),
-                        instr,
-                    )
-                )
-            elif arg == _NB_OR:
-                r = stack.pop()
-                l = stack.pop()  # noqa: E741
-                stack.append(
-                    _set_pos(
-                        ast.BinOp(left=l, op=ast.BitOr(), right=r),
-                        instr,
-                    )
-                )
-            else:
-                raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
-        elif op == "BUILD_TUPLE":
-            n = argval
-            if n:
-                elts = stack[-n:]
-                del stack[-n:]
-            else:
-                elts = []
-            stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
-        elif op == "BUILD_LIST":
-            n = argval
-            if n:
-                elts = stack[-n:]
-                del stack[-n:]
-            else:
-                elts = []
-            stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
-        elif op == "MAKE_FUNCTION":
-            top = stack.pop()
-            if (
-                isinstance(top, ast.Constant)
-                and isinstance(top.value, types.CodeType)
-                and top.value.co_name == "<listcomp>"
-            ):
-                stack.append(top)
-            else:
-                stack.append(_set_pos(ast.Constant(value="<function>"), instr))
-        elif op == "GET_ITER":
-            iterable_node = stack.pop()
-            if (
-                stack
-                and isinstance(stack[-1], ast.Constant)
-                and isinstance(stack[-1].value, types.CodeType)
-            ):
-                code_marker = stack.pop()
-                comp = _decompile_listcomp_code(
-                    code_marker.value, iterable_node
-                )
-                stack.append(comp)
-                while (
-                    pc < len(instructions) and instructions[pc].opname != "CALL"
-                ):
-                    pc += 1
-                pc += 1
-            else:
-                comp, pc = _decompile_inline_comp(
-                    instructions, offset_to_idx, pc, iterable_node
-                )
-                stack.append(comp)
-        elif op == "LIST_EXTEND":
-            source = stack.pop()
-            target = stack[-argval]
-            assert isinstance(target, ast.List)
-            target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
-        elif op == "LIST_APPEND":
-            item = stack.pop()
-            target = stack[-argval]
-            assert isinstance(target, ast.List)
-            target.elts.append(item)
-        elif op == "CALL_INTRINSIC_1":
-            if arg == _INTRINSIC_LIST_TO_TUPLE:
-                list_node = stack.pop()
-                assert isinstance(list_node, ast.List)
-                stack.append(ast.Tuple(elts=list_node.elts, ctx=ast.Load()))
-            else:
-                raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
-        elif op in ("NOT_TAKEN", "PUSH_NULL"):
+        if _exec_stack_op(instr, stack):
             pass
+        elif op == "GET_ITER":
+            pc = _handle_get_iter(instructions, offset_to_idx, pc, stack)
         else:
             raise DecompileError(
                 f"Unsupported opcode in expr: {op} "
-                f"(arg={arg}, argval={argval!r})"
+                f"(arg={instr.arg}, argval={instr.argval!r})"
             )
 
     assert len(stack) == initial_depth + 1, (
@@ -839,6 +721,11 @@ def _run_expr(
         f"got {len(stack) - initial_depth}"
     )
     return stack.pop(), pc
+
+
+# ---------------------------------------------------------------------------
+# IfExp branch merging (position-aware)
+# ---------------------------------------------------------------------------
 
 
 def _merge_values(
@@ -943,6 +830,11 @@ def _merge_branch_results(
             result[key] = true_val
         elif false_val is not None:
             result[key] = false_val
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def decompile_annotations(
