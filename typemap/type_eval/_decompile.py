@@ -407,6 +407,70 @@ def _run_expr(
     return stack.pop(), pc
 
 
+def _factor_ifexp(
+    true_val: ast.expr,
+    false_val: ast.expr,
+    test: ast.expr,
+) -> ast.expr:
+    """Build an IfExp, pushing it as deep as possible into shared structure.
+
+    When the compiler duplicates surrounding context into both branches
+    (e.g. ``list[int]`` vs ``list[str]`` for ``list[int if T else str]``),
+    we want ``Subscript(list, IfExp(...))`` not ``IfExp(..., Subscript(list,int), ...)``.
+    """
+    if ast.dump(true_val) == ast.dump(false_val):
+        return true_val
+
+    # Both are Subscript with the same value — push IfExp into the slice
+    if (
+        isinstance(true_val, ast.Subscript)
+        and isinstance(false_val, ast.Subscript)
+        and ast.dump(true_val.value) == ast.dump(false_val.value)
+    ):
+        return ast.Subscript(
+            value=true_val.value,
+            slice=_factor_ifexp(true_val.slice, false_val.slice, test),
+            ctx=ast.Load(),
+        )
+
+    # Both are Tuple with the same length — push into differing elements
+    if (
+        isinstance(true_val, ast.Tuple)
+        and isinstance(false_val, ast.Tuple)
+        and len(true_val.elts) == len(false_val.elts)
+    ):
+        elts = [
+            _factor_ifexp(t, f, test)
+            for t, f in zip(true_val.elts, false_val.elts)
+        ]
+        return ast.Tuple(elts=elts, ctx=ast.Load())
+
+    # Both are BinOp with the same operator — push into differing operand
+    if (
+        isinstance(true_val, ast.BinOp)
+        and isinstance(false_val, ast.BinOp)
+        and type(true_val.op) is type(false_val.op)
+    ):
+        left = _factor_ifexp(true_val.left, false_val.left, test)
+        right = _factor_ifexp(true_val.right, false_val.right, test)
+        return ast.BinOp(left=left, op=true_val.op, right=right)
+
+    # Both are Attribute with the same attr — push into value
+    if (
+        isinstance(true_val, ast.Attribute)
+        and isinstance(false_val, ast.Attribute)
+        and true_val.attr == false_val.attr
+    ):
+        return ast.Attribute(
+            value=_factor_ifexp(true_val.value, false_val.value, test),
+            attr=true_val.attr,
+            ctx=ast.Load(),
+        )
+
+    # No shared structure — wrap at this level
+    return ast.IfExp(test=test, body=true_val, orelse=false_val)
+
+
 def _merge_branch_results(
     result: dict[str, ast.expr],
     true_branch: dict[str, ast.expr],
@@ -415,9 +479,9 @@ def _merge_branch_results(
 ) -> None:
     """Merge results from two tail-position if-expression branches.
 
-    Keys that appear in both branches with different values get wrapped
-    in ast.IfExp.  Keys with identical AST in both branches pass through
-    unchanged (they were computed before the branch point).
+    Keys that appear in both branches with different values get an IfExp
+    pushed as deep as possible into shared structure.  Keys with identical
+    AST in both branches pass through unchanged.
     """
     all_keys = list(true_branch.keys())
     for k in false_branch:
@@ -429,13 +493,7 @@ def _merge_branch_results(
         false_val = false_branch.get(key)
 
         if true_val is not None and false_val is not None:
-            if ast.dump(true_val) == ast.dump(false_val):
-                # Same value in both branches — not conditional
-                result[key] = true_val
-            else:
-                result[key] = ast.IfExp(
-                    test=test, body=true_val, orelse=false_val
-                )
+            result[key] = _factor_ifexp(true_val, false_val, test)
         elif true_val is not None:
             result[key] = true_val
         elif false_val is not None:
