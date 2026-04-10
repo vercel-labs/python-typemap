@@ -136,9 +136,6 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
     {
         # lambda in Annotated — not decompilable
         "_annos::fn57.return",
-        # SET_FUNCTION_ATTRIBUTE opcode in __init_subclass__ closure
-        "test_qblike_3::Table.__init_subclass__.cls",
-        "test_qblike_3::Table.__init_subclass__.return",
     }
 )
 

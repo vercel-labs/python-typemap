@@ -217,6 +217,14 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         else:
             raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
 
+    elif op == "SET_FUNCTION_ATTRIBUTE":
+        # Closure / defaults attached to a function we already processed
+        # via MAKE_FUNCTION.  TOS is the function, TOS1 is the attribute
+        # value (e.g. closure tuple).  Pop TOS1, leave TOS in place.
+        func_node = stack.pop()
+        stack.pop()  # discard the attribute value (closure tuple, etc.)
+        stack.append(func_node)
+
     elif op in ("NOT_TAKEN", "PUSH_NULL"):
         pass
 
