@@ -542,3 +542,18 @@ def fn110[T]() -> list[int] if T else list[str]: ...
 
 
 def fn111[T]() -> (int | None) if T else (str | None): ...
+
+
+##
+
+
+def fn112[T](
+    x: list[int if T else str],
+    y: list[int] if T else list[str],
+) -> None: ...
+
+
+def fn113[T](
+    x: (int | None) if T else (str | None),
+    y: (int if T else str) | None,
+) -> None: ...
