@@ -531,3 +531,14 @@ def fn108[T]() -> tuple[int if T else str, float]: ...
 
 
 def fn109[T]() -> Callable[[int if T else str], bool]: ...
+
+
+# ---------------------------------------------------------------------------
+# Outer if-expressions (NOT factored into inner position)
+# ---------------------------------------------------------------------------
+
+
+def fn110[T]() -> list[int] if T else list[str]: ...
+
+
+def fn111[T]() -> (int | None) if T else (str | None): ...

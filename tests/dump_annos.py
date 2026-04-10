@@ -7,7 +7,6 @@ For each function, shows three views:
 """
 
 import ast
-import importlib
 import importlib.util
 import pathlib
 import sys
@@ -71,7 +70,9 @@ def load_stringified_copy() -> types.ModuleType:
     tmp.flush()
     tmp.close()
 
-    spec = importlib.util.spec_from_file_location("_annos_stringified", tmp.name)
+    spec = importlib.util.spec_from_file_location(
+        "_annos_stringified", tmp.name
+    )
     string_mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = string_mod
     spec.loader.exec_module(string_mod)
@@ -81,7 +82,9 @@ def load_stringified_copy() -> types.ModuleType:
 def get_annotations_str(func: types.FunctionType) -> dict[str, str]:
     """Get annotations from a function that used ``from __future__ import annotations``
     (all values will be plain strings)."""
-    return annotationlib.get_annotations(func, format=annotationlib.Format.STRING)
+    return annotationlib.get_annotations(
+        func, format=annotationlib.Format.STRING
+    )
 
 
 def parse_annotation(anno_str: str) -> ast.expr:
@@ -106,9 +109,7 @@ def main() -> None:
         string_func = string_map.get(qname)
         string_annos = get_annotations_str(string_func) if string_func else {}
 
-        params = [
-            k for k in value_annos if k != "return"
-        ]
+        params = [k for k in value_annos if k != "return"]
         all_keys = params + (["return"] if "return" in value_annos else [])
 
         print(f"{qname}:")

@@ -23,9 +23,9 @@ from tests.dump_annos import (
 from typemap.type_eval._decompile import DecompileError, decompile_annotations
 
 
-def _collect_cases() -> (
-    list[tuple[str, str, types.FunctionType, types.FunctionType]]
-):
+def _collect_cases() -> list[
+    tuple[str, str, types.FunctionType, types.FunctionType]
+]:
     """Build (qname, key, value_func, string_func) for every annotation."""
     value_fns = collect_functions(mod)
     string_mod = load_stringified_copy()
@@ -45,7 +45,9 @@ def _collect_cases() -> (
 _CASES = _collect_cases()
 
 
-def _case_id(case: tuple[str, str, types.FunctionType, types.FunctionType]) -> str:
+def _case_id(
+    case: tuple[str, str, types.FunctionType, types.FunctionType],
+) -> str:
     qname, key, _, _ = case
     return f"{qname}.{key}"
 
@@ -72,7 +74,9 @@ def test_decompile_annotation(
     if got_dump != expected_dump:
         # Check if this is the known lambda-in-Annotated case
         if "<function>" in got_dump:
-            pytest.xfail("lambda/function objects in annotations cannot be decompiled")
+            pytest.xfail(
+                "lambda/function objects in annotations cannot be decompiled"
+            )
         assert got_dump == expected_dump, (
             f"{qname}.{key}:\n  expected: {expected_dump}\n  got:      {got_dump}"
         )
@@ -127,7 +131,9 @@ def main() -> None:
             )
             failed += 1
 
-    print(f"Passed: {passed}, Failed: {failed}, Skipped: {skipped}, XFailed: {xfailed}")
+    print(
+        f"Passed: {passed}, Failed: {failed}, Skipped: {skipped}, XFailed: {xfailed}"
+    )
     if errors:
         print("\nFailures:")
         for e in errors:
