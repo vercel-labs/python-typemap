@@ -511,3 +511,23 @@ class ConditionalAttrs[T]:
 class ConditionalAttrsLast[T]:
     y: float
     x: int if T else str
+
+
+# ---------------------------------------------------------------------------
+# If-expressions nested inside other type constructs
+# ---------------------------------------------------------------------------
+
+
+def fn105[T]() -> list[int if T else str]: ...
+
+
+def fn106[T]() -> dict[str, int if T else str]: ...
+
+
+def fn107[T]() -> (int if T else str) | None: ...
+
+
+def fn108[T]() -> tuple[int if T else str, float]: ...
+
+
+def fn109[T]() -> Callable[[int if T else str], bool]: ...
