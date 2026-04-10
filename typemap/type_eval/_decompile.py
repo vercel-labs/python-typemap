@@ -7,18 +7,23 @@ with a virtual stack and reconstructs equivalent ast.expr trees.
 Two dict-building patterns exist:
 
   Function annotations:
-    LOAD_CONST 'key1'  <expr1>  LOAD_CONST 'key2'  <expr2> ... BUILD_MAP N  RETURN_VALUE
+    LOAD_CONST 'key1'  <expr1>  ...  BUILD_MAP N  RETURN_VALUE
 
   Class annotations:
-    BUILD_MAP 0  <expr> COPY 2 LOAD_CONST 'key' STORE_SUBSCR  ...  RETURN_VALUE
+    BUILD_MAP 0  <expr> COPY 2 LOAD_CONST 'key' STORE_SUBSCR ...
 
-Either pattern may contain if-expressions, which introduce control flow:
+Either pattern may contain if-expressions (control flow):
 
   Inline (non-last annotation):
-    ... TO_BOOL POP_JUMP_IF_FALSE(else) <true> JUMP_FORWARD(join) <false> ...
+    TO_BOOL POP_JUMP_IF_FALSE <true> JUMP_FORWARD <false>
 
   Tail-position (last annotation):
-    ... TO_BOOL POP_JUMP_IF_FALSE(else) <true-branch+return> <false-branch+return>
+    TO_BOOL POP_JUMP_IF_FALSE <true+return> <false+return>
+
+For tail-position if-expressions, the compiler duplicates surrounding context
+into both branches.  Source position info on bytecode instructions distinguishes
+shared structure (same source span → factor into inner IfExp) from independent
+structure (different span → wrap with outer IfExp).
 """
 
 from __future__ import annotations
@@ -32,6 +37,10 @@ from typing import Any, Union
 # BINARY_OP arg constants (from dis._nb_ops)
 _NB_OR = 7  # |
 _NB_SUBSCR = 26  # []
+
+# Stack sentinels (compared by identity)
+_CLASSDICT: ast.expr = ast.Name(id="__classdict__")
+_MAP: ast.expr = ast.Name(id="__map__")
 
 
 class DecompileError(Exception):
@@ -47,6 +56,42 @@ def _const_to_ast(value: Any) -> ast.expr:
     if isinstance(value, tuple):
         return ast.Tuple(elts=[_const_to_ast(v) for v in value], ctx=ast.Load())
     return ast.Constant(value=value)
+
+
+def _set_pos(node: ast.expr, instr: dis.Instruction) -> ast.expr:
+    """Copy source positions from a bytecode instruction onto an AST node."""
+    pos = instr.positions
+    if pos and pos.lineno is not None and pos.col_offset is not None:
+        node.lineno = pos.lineno
+        node.col_offset = pos.col_offset
+        node.end_lineno = pos.end_lineno
+        node.end_col_offset = pos.end_col_offset
+    return node
+
+
+def _get_span(
+    node: ast.expr,
+) -> tuple[int | None, int | None, int | None, int | None]:
+    """Extract the source span from an AST node."""
+    return (
+        getattr(node, "lineno", None),
+        getattr(node, "col_offset", None),
+        getattr(node, "end_lineno", None),
+        getattr(node, "end_col_offset", None),
+    )
+
+
+def _same_span(a: ast.expr, b: ast.expr) -> bool:
+    """Check whether two AST nodes have the same source span.
+
+    Returns True if either node lacks position info (conservative:
+    assume shared).
+    """
+    sa = _get_span(a)
+    sb = _get_span(b)
+    if None in sa or None in sb:
+        return True  # can't distinguish → assume shared
+    return sa == sb
 
 
 def _decompile_bytecode(
@@ -76,7 +121,7 @@ def _run(
     instructions: list[dis.Instruction],
     offset_to_idx: dict[int, int],
     pc: int,
-    stack: list[ast.expr | str],
+    stack: list[ast.expr],
     result: dict[str, ast.expr],
 ) -> None:
     """Execute bytecode from `pc`, mutating `stack` and `result`.
@@ -96,29 +141,34 @@ def _run(
         pc += 1
 
         if op == "LOAD_CONST":
-            stack.append(_const_to_ast(argval))
+            stack.append(_set_pos(_const_to_ast(argval), instr))
 
         elif op == "LOAD_SMALL_INT":
-            stack.append(ast.Constant(value=argval))
+            stack.append(_set_pos(ast.Constant(value=argval), instr))
 
         elif op in ("LOAD_GLOBAL", "LOAD_NAME"):
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
 
         elif op == "LOAD_DEREF":
             if argval == "__classdict__":
-                stack.append("__classdict__")
+                stack.append(_CLASSDICT)
             else:
-                stack.append(ast.Name(id=argval, ctx=ast.Load()))
+                stack.append(
+                    _set_pos(ast.Name(id=argval, ctx=ast.Load()), instr)
+                )
 
         elif op in ("LOAD_FROM_DICT_OR_GLOBALS", "LOAD_FROM_DICT_OR_DEREF"):
-            if stack and stack[-1] == "__classdict__":
+            if stack and stack[-1] is _CLASSDICT:
                 stack.pop()
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
 
         elif op == "LOAD_ATTR":
             obj = stack.pop()
             stack.append(
-                ast.Attribute(value=obj, attr=argval, ctx=ast.Load())
+                _set_pos(
+                    ast.Attribute(value=obj, attr=argval, ctx=ast.Load()),
+                    instr,
+                )
             )
 
         elif op == "BINARY_OP":
@@ -126,15 +176,21 @@ def _run(
                 slice_node = stack.pop()
                 value_node = stack.pop()
                 stack.append(
-                    ast.Subscript(
-                        value=value_node, slice=slice_node, ctx=ast.Load()
+                    _set_pos(
+                        ast.Subscript(
+                            value=value_node, slice=slice_node, ctx=ast.Load()
+                        ),
+                        instr,
                     )
                 )
             elif arg == _NB_OR:
                 right = stack.pop()
                 left = stack.pop()
                 stack.append(
-                    ast.BinOp(left=left, op=ast.BitOr(), right=right)
+                    _set_pos(
+                        ast.BinOp(left=left, op=ast.BitOr(), right=right),
+                        instr,
+                    )
                 )
             else:
                 raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
@@ -146,7 +202,7 @@ def _run(
                 del stack[-n:]
             else:
                 elts = []
-            stack.append(ast.Tuple(elts=elts, ctx=ast.Load()))
+            stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
 
         elif op == "BUILD_LIST":
             n = argval
@@ -155,12 +211,12 @@ def _run(
                 del stack[-n:]
             else:
                 elts = []
-            stack.append(ast.List(elts=elts, ctx=ast.Load()))
+            stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
 
         elif op == "BUILD_MAP":
             n = argval
             if n == 0:
-                stack.append("__map__")
+                stack.append(_MAP)
             else:
                 items = stack[-n * 2 :]
                 del stack[-n * 2 :]
@@ -168,6 +224,7 @@ def _run(
                     key_node = items[i]
                     val_node = items[i + 1]
                     assert isinstance(key_node, ast.Constant)
+                    assert isinstance(key_node.value, str)
                     result[key_node.value] = val_node
 
         elif op == "COPY":
@@ -178,11 +235,12 @@ def _run(
             stack.pop()  # __map__ copy
             val_node = stack.pop()
             assert isinstance(key_node, ast.Constant)
+            assert isinstance(key_node.value, str)
             result[key_node.value] = val_node
 
         elif op == "MAKE_FUNCTION":
             stack.pop()
-            stack.append(ast.Constant(value="<function>"))
+            stack.append(_set_pos(ast.Constant(value="<function>"), instr))
 
         elif op == "TO_BOOL":
             # The test expression is on top of stack.  The next meaningful
@@ -197,13 +255,19 @@ def _run(
             assert (
                 pc < len(instructions)
                 and instructions[pc].opname == "POP_JUMP_IF_FALSE"
-            ), f"Expected POP_JUMP_IF_FALSE after TO_BOOL, got {instructions[pc].opname}"
+            ), (
+                "Expected POP_JUMP_IF_FALSE after TO_BOOL, "
+                f"got {instructions[pc].opname}"
+            )
             jump_instr = instructions[pc]
             else_idx = offset_to_idx[jump_instr.argval]
             pc += 1  # skip POP_JUMP_IF_FALSE
 
             # Skip NOT_TAKEN after POP_JUMP_IF_FALSE
-            while pc < len(instructions) and instructions[pc].opname == "NOT_TAKEN":
+            while (
+                pc < len(instructions)
+                and instructions[pc].opname == "NOT_TAKEN"
+            ):
                 pc += 1
 
             # Check whether this is inline (true branch ends with
@@ -218,7 +282,10 @@ def _run(
                 assert instructions[pc].opname == "JUMP_FORWARD"
                 join_idx = offset_to_idx[instructions[pc].argval]
                 false_val, _ = _run_expr(
-                    instructions, offset_to_idx, else_idx, list(stack),
+                    instructions,
+                    offset_to_idx,
+                    else_idx,
+                    list(stack),
                     end=join_idx,
                 )
                 stack.append(
@@ -276,7 +343,8 @@ def _run(
 def _is_inline_ifexp(
     instructions: list[dis.Instruction], true_start: int, else_idx: int
 ) -> bool:
-    """Check if the true branch ends with JUMP_FORWARD (inline) vs RETURN_VALUE (tail)."""
+    """Check if the true branch ends with JUMP_FORWARD (inline)
+    vs RETURN_VALUE (tail)."""
     for i in range(true_start, else_idx):
         if instructions[i].opname == "JUMP_FORWARD":
             return True
@@ -289,7 +357,7 @@ def _run_expr(
     instructions: list[dis.Instruction],
     offset_to_idx: dict[int, int],
     pc: int,
-    stack: list[ast.expr | str],
+    stack: list[ast.expr],
     end: int | None = None,
 ) -> tuple[ast.expr, int]:
     """Run bytecode for a single expression, returning the value and new pc.
@@ -315,17 +383,25 @@ def _run_expr(
         if op == "TO_BOOL":
             test_node = stack.pop()
             pc += 1
-            while pc < len(instructions) and instructions[pc].opname == "NOT_TAKEN":
+            while (
+                pc < len(instructions)
+                and instructions[pc].opname == "NOT_TAKEN"
+            ):
                 pc += 1
             assert instructions[pc].opname == "POP_JUMP_IF_FALSE"
             jump_instr = instructions[pc]
             else_idx = offset_to_idx[jump_instr.argval]
             pc += 1
-            while pc < len(instructions) and instructions[pc].opname == "NOT_TAKEN":
+            while (
+                pc < len(instructions)
+                and instructions[pc].opname == "NOT_TAKEN"
+            ):
                 pc += 1
 
             if _is_inline_ifexp(instructions, pc, else_idx):
-                true_val, pc = _run_expr(instructions, offset_to_idx, pc, list(stack))
+                true_val, pc = _run_expr(
+                    instructions, offset_to_idx, pc, list(stack)
+                )
                 assert instructions[pc].opname == "JUMP_FORWARD"
                 join_idx = offset_to_idx[instructions[pc].argval]
                 false_val, _ = _run_expr(
@@ -347,32 +423,49 @@ def _run_expr(
         pc += 1
 
         if op == "LOAD_CONST":
-            stack.append(_const_to_ast(argval))
+            stack.append(_set_pos(_const_to_ast(argval), instr))
         elif op == "LOAD_SMALL_INT":
-            stack.append(ast.Constant(value=argval))
+            stack.append(_set_pos(ast.Constant(value=argval), instr))
         elif op in ("LOAD_GLOBAL", "LOAD_NAME"):
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
         elif op == "LOAD_DEREF":
             if argval == "__classdict__":
-                stack.append("__classdict__")
+                stack.append(_CLASSDICT)
             else:
-                stack.append(ast.Name(id=argval, ctx=ast.Load()))
+                stack.append(
+                    _set_pos(ast.Name(id=argval, ctx=ast.Load()), instr)
+                )
         elif op in ("LOAD_FROM_DICT_OR_GLOBALS", "LOAD_FROM_DICT_OR_DEREF"):
-            if stack and stack[-1] == "__classdict__":
+            if stack and stack[-1] is _CLASSDICT:
                 stack.pop()
-            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+            stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
         elif op == "LOAD_ATTR":
             obj = stack.pop()
-            stack.append(ast.Attribute(value=obj, attr=argval, ctx=ast.Load()))
+            stack.append(
+                _set_pos(
+                    ast.Attribute(value=obj, attr=argval, ctx=ast.Load()),
+                    instr,
+                )
+            )
         elif op == "BINARY_OP":
             if arg == _NB_SUBSCR:
                 s = stack.pop()
                 v = stack.pop()
-                stack.append(ast.Subscript(value=v, slice=s, ctx=ast.Load()))
+                stack.append(
+                    _set_pos(
+                        ast.Subscript(value=v, slice=s, ctx=ast.Load()),
+                        instr,
+                    )
+                )
             elif arg == _NB_OR:
                 r = stack.pop()
-                l = stack.pop()
-                stack.append(ast.BinOp(left=l, op=ast.BitOr(), right=r))
+                l = stack.pop()  # noqa: E741
+                stack.append(
+                    _set_pos(
+                        ast.BinOp(left=l, op=ast.BitOr(), right=r),
+                        instr,
+                    )
+                )
             else:
                 raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
         elif op == "BUILD_TUPLE":
@@ -382,7 +475,7 @@ def _run_expr(
                 del stack[-n:]
             else:
                 elts = []
-            stack.append(ast.Tuple(elts=elts, ctx=ast.Load()))
+            stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
         elif op == "BUILD_LIST":
             n = argval
             if n:
@@ -390,15 +483,16 @@ def _run_expr(
                 del stack[-n:]
             else:
                 elts = []
-            stack.append(ast.List(elts=elts, ctx=ast.Load()))
+            stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
         elif op == "MAKE_FUNCTION":
             stack.pop()
-            stack.append(ast.Constant(value="<function>"))
+            stack.append(_set_pos(ast.Constant(value="<function>"), instr))
         elif op in ("NOT_TAKEN", "PUSH_NULL"):
             pass
         else:
             raise DecompileError(
-                f"Unsupported opcode in expr: {op} (arg={arg}, argval={argval!r})"
+                f"Unsupported opcode in expr: {op} "
+                f"(arg={arg}, argval={argval!r})"
             )
 
     assert len(stack) == initial_depth + 1, (
@@ -408,79 +502,83 @@ def _run_expr(
     return stack.pop(), pc
 
 
-def _factor_ifexp(
+def _merge_values(
     true_val: ast.expr,
     false_val: ast.expr,
     test: ast.expr,
 ) -> ast.expr:
-    """Build an IfExp, pushing it as deep as possible into shared structure.
+    """Merge two branch values, using source positions to decide factoring.
 
-    When an if-expression is nested inside a type construct, the compiler
-    duplicates the surrounding context into both tail-position branches.
-    For prefix context (``list[int if T else str]``), ``list`` is loaded
-    before the branch and consumed by both.  For postfix context
-    (``(int if T else str) | None``), ``| None`` is duplicated into each
-    branch.  In both cases, after running both branches we get structurally
-    similar results (e.g. ``list[int]`` vs ``list[str]``).  This function
-    recovers the original nesting by recursively finding the point of
-    divergence.
+    When the compiler duplicates surrounding context into both branches of
+    a tail-position if-expression, the duplicated instructions share the
+    same source span.  If two branch result nodes have the same span, we
+    recurse into their children to find the point of divergence.  If they
+    have different spans, they represent independent structure and we wrap
+    with a plain IfExp.
 
-    The factoring is semantically sound: ``X[A if C else B]`` and
-    ``X[A] if C else X[B]`` are equivalent, as are ``(A if C else B) | Z``
-    and ``(A | Z) if C else (B | Z)``.  Postfix cases produce identical
-    bytecode in tail position so we can't distinguish them; prefix cases
-    produce different bytecode but we normalize to the inner form anyway.
+    Example — ``list[int if T else str]``::
+
+        Both branches produce Subscript(list, int) and Subscript(list, str).
+        The Subscript nodes share the same source span (the whole
+        ``list[...]`` expression) → recurse.  The slices ``int`` vs ``str``
+        have different spans → IfExp there.
+        Result: Subscript(list, IfExp(T, int, str))
+
+    Example — ``list[int] if T else list[str]``::
+
+        Both branches again produce Subscript(list, int) and
+        Subscript(list, str), but now the Subscript nodes have *different*
+        spans (``list[int]`` vs ``list[str]``) → stop, IfExp at top level.
+        Result: IfExp(T, Subscript(list, int), Subscript(list, str))
     """
     if ast.dump(true_val) == ast.dump(false_val):
         return true_val
 
-    # Both are Subscript with the same value — push IfExp into the slice
-    if (
-        isinstance(true_val, ast.Subscript)
-        and isinstance(false_val, ast.Subscript)
-        and ast.dump(true_val.value) == ast.dump(false_val.value)
+    if not _same_span(true_val, false_val):
+        return ast.IfExp(test=test, body=true_val, orelse=false_val)
+
+    # Same span — shared structure.  Recurse into matching node types.
+
+    if isinstance(true_val, ast.Subscript) and isinstance(
+        false_val, ast.Subscript
     ):
         return ast.Subscript(
-            value=true_val.value,
-            slice=_factor_ifexp(true_val.slice, false_val.slice, test),
+            value=_merge_values(true_val.value, false_val.value, test),
+            slice=_merge_values(true_val.slice, false_val.slice, test),
             ctx=ast.Load(),
         )
 
-    # Both are Tuple with the same length — push into differing elements
     if (
         isinstance(true_val, ast.Tuple)
         and isinstance(false_val, ast.Tuple)
         and len(true_val.elts) == len(false_val.elts)
     ):
         elts = [
-            _factor_ifexp(t, f, test)
-            for t, f in zip(true_val.elts, false_val.elts)
+            _merge_values(t, f, test)
+            for t, f in zip(true_val.elts, false_val.elts, strict=True)
         ]
         return ast.Tuple(elts=elts, ctx=ast.Load())
 
-    # Both are BinOp with the same operator — push into differing operand
     if (
         isinstance(true_val, ast.BinOp)
         and isinstance(false_val, ast.BinOp)
         and type(true_val.op) is type(false_val.op)
     ):
-        left = _factor_ifexp(true_val.left, false_val.left, test)
-        right = _factor_ifexp(true_val.right, false_val.right, test)
+        left = _merge_values(true_val.left, false_val.left, test)
+        right = _merge_values(true_val.right, false_val.right, test)
         return ast.BinOp(left=left, op=true_val.op, right=right)
 
-    # Both are Attribute with the same attr — push into value
     if (
         isinstance(true_val, ast.Attribute)
         and isinstance(false_val, ast.Attribute)
         and true_val.attr == false_val.attr
     ):
         return ast.Attribute(
-            value=_factor_ifexp(true_val.value, false_val.value, test),
+            value=_merge_values(true_val.value, false_val.value, test),
             attr=true_val.attr,
             ctx=ast.Load(),
         )
 
-    # No shared structure — wrap at this level
     return ast.IfExp(test=test, body=true_val, orelse=false_val)
 
 
@@ -501,7 +599,7 @@ def _merge_branch_results(
         false_val = false_branch.get(key)
 
         if true_val is not None and false_val is not None:
-            result[key] = _factor_ifexp(true_val, false_val, test)
+            result[key] = _merge_values(true_val, false_val, test)
         elif true_val is not None:
             result[key] = true_val
         elif false_val is not None:
