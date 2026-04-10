@@ -485,3 +485,29 @@ def fn100() -> (
     ]
     | None
 ): ...
+
+
+# ---------------------------------------------------------------------------
+# If-expressions (conditional types, PEP 827)
+# ---------------------------------------------------------------------------
+
+
+def fn101[T](x: T) -> int if T else str: ...
+
+
+def fn102[T](x: int if T else str, y: float) -> None: ...
+
+
+def fn103[T, U]() -> int if T else str if U else float: ...
+
+
+class ConditionalAttrs[T]:
+    x: int if T else str
+    y: float
+
+    def fn104(self) -> int if T else str: ...
+
+
+class ConditionalAttrsLast[T]:
+    y: float
+    x: int if T else str
