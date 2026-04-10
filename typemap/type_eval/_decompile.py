@@ -416,21 +416,20 @@ def _factor_ifexp(
     """Build an IfExp, pushing it as deep as possible into shared structure.
 
     When an if-expression is nested inside a type construct, the compiler
-    duplicates the surrounding context into both branches.  For prefix
-    context (``list[int if T else str]``), ``list`` is loaded before the
-    branch and consumed by both.  For postfix context
+    duplicates the surrounding context into both tail-position branches.
+    For prefix context (``list[int if T else str]``), ``list`` is loaded
+    before the branch and consumed by both.  For postfix context
     (``(int if T else str) | None``), ``| None`` is duplicated into each
     branch.  In both cases, after running both branches we get structurally
     similar results (e.g. ``list[int]`` vs ``list[str]``).  This function
     recovers the original nesting by recursively finding the point of
     divergence.
 
-    Note: postfix cases like ``(X if T else Y) | None`` produce identical
-    bytecode to ``(X | None) if T else (Y | None)``, so we always normalize
-    to the inner form.  Prefix cases like ``list[int if T else str]`` vs
-    ``list[int] if T else list[str]`` DO produce different bytecode, but
-    the branch results look the same after full evaluation, so we normalize
-    those too.  This is a known limitation — both forms are type-equivalent.
+    The factoring is semantically sound: ``X[A if C else B]`` and
+    ``X[A] if C else X[B]`` are equivalent, as are ``(A if C else B) | Z``
+    and ``(A | Z) if C else (B | Z)``.  Postfix cases produce identical
+    bytecode in tail position so we can't distinguish them; prefix cases
+    produce different bytecode but we normalize to the inner form anyway.
     """
     if ast.dump(true_val) == ast.dump(false_val):
         return true_val
