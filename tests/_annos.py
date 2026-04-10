@@ -38,6 +38,8 @@ from typing import (
     runtime_checkable,
 )
 
+from typemap.typing import IsAssignable, Iter, Member
+
 
 # ---------------------------------------------------------------------------
 # PEP 695 type aliases and type variables
@@ -557,3 +559,42 @@ def fn113[T](
     x: (int | None) if T else (str | None),
     y: (int if T else str) | None,
 ) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Unpacked comprehension types (PEP 827)
+# ---------------------------------------------------------------------------
+
+
+# Module-level functions — inlined comprehension bytecode (Pattern B)
+
+
+def fn114[T]() -> tuple[*[x for x in Iter[T]]]: ...
+
+
+def fn115[T]() -> tuple[*[m.name for m in Iter[T]]]: ...
+
+
+def fn116[T]() -> tuple[*[Member[m.name, m.type] for m in Iter[T]]]: ...
+
+
+def fn117[T]() -> tuple[*[m for m in Iter[T] if IsAssignable[m.type, int]]]: ...
+
+
+def fn118[A, B]() -> tuple[
+    *[x for x in Iter[A]],
+    *[y for y in Iter[B]],
+]: ...
+
+
+# Class methods — separate code object bytecode (Pattern A)
+
+
+class CompNode[T]:
+    def fn119(self) -> tuple[*[x for x in Iter[T]]]: ...
+
+    def fn120(self) -> tuple[*[Member[m.name, m.type] for m in Iter[T]]]: ...
+
+    def fn121(
+        self,
+    ) -> tuple[*[m for m in Iter[T] if IsAssignable[m.type, int]]]: ...

@@ -38,6 +38,9 @@ from typing import Any, Union
 _NB_OR = 7  # |
 _NB_SUBSCR = 26  # []
 
+# CALL_INTRINSIC_1 arg constants
+_INTRINSIC_LIST_TO_TUPLE = 6
+
 # Stack sentinels (compared by identity)
 _CLASSDICT: ast.expr = ast.Name(id="__classdict__")
 _MAP: ast.expr = ast.Name(id="__map__")
@@ -92,6 +95,241 @@ def _same_span(a: ast.expr, b: ast.expr) -> bool:
     if None in sa or None in sb:
         return True  # can't distinguish → assume shared
     return sa == sb
+
+
+def _decompile_comp_body(
+    instructions: list[dis.Instruction],
+    offset_to_idx: dict[int, int],
+    pc: int,
+    var_name: str,
+    has_initial_load: bool,
+) -> tuple[ast.expr, list[ast.expr], int]:
+    """Walk comprehension body instructions, returning the body AST.
+
+    Processes instructions from after STORE_FAST/STORE_FAST_LOAD_FAST
+    up through LIST_APPEND.  Detects filter clauses (``if`` in the
+    comprehension) by the pattern TO_BOOL → POP_JUMP_IF_TRUE →
+    NOT_TAKEN → JUMP_BACKWARD.
+
+    Returns (body_expr, filter_ifs, pc_after_LIST_APPEND).
+    """
+    stack: list[ast.expr] = []
+    if has_initial_load:
+        stack.append(ast.Name(id=var_name, ctx=ast.Load()))
+    filters: list[ast.expr] = []
+
+    while pc < len(instructions):
+        instr = instructions[pc]
+        op = instr.opname
+        arg = instr.arg
+        argval = instr.argval
+
+        if op == "LIST_APPEND":
+            body = stack.pop()
+            return body, filters, pc + 1
+
+        # Filter detection: TO_BOOL followed by
+        # POP_JUMP_IF_TRUE → NOT_TAKEN → JUMP_BACKWARD
+        if op == "TO_BOOL":
+            filter_expr = stack.pop()
+            npc = pc + 1
+            while (
+                npc < len(instructions)
+                and instructions[npc].opname == "NOT_TAKEN"
+            ):
+                npc += 1
+            pjmp = instructions[npc]
+            if pjmp.opname in (
+                "POP_JUMP_IF_TRUE",
+                "POP_JUMP_IF_FALSE",
+            ):
+                # Check if fallthrough goes to JUMP_BACKWARD (skip)
+                after = npc + 1
+                while (
+                    after < len(instructions)
+                    and instructions[after].opname == "NOT_TAKEN"
+                ):
+                    after += 1
+                if instructions[after].opname == "JUMP_BACKWARD":
+                    # This is a filter clause
+                    if pjmp.opname == "POP_JUMP_IF_FALSE":
+                        filter_expr = ast.UnaryOp(
+                            op=ast.Not(), operand=filter_expr
+                        )
+                    filters.append(filter_expr)
+                    pc = after + 1  # skip past JUMP_BACKWARD
+                    continue
+            raise DecompileError(
+                "Unexpected TO_BOOL pattern in comprehension body"
+            )
+
+        pc += 1
+
+        if op == "LOAD_CONST":
+            stack.append(_const_to_ast(argval))
+        elif op == "LOAD_SMALL_INT":
+            stack.append(ast.Constant(value=argval))
+        elif op in ("LOAD_GLOBAL", "LOAD_NAME"):
+            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+        elif op in ("LOAD_FAST", "LOAD_FAST_BORROW"):
+            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+        elif op == "LOAD_DEREF":
+            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+        elif op in (
+            "LOAD_FROM_DICT_OR_GLOBALS",
+            "LOAD_FROM_DICT_OR_DEREF",
+        ):
+            if stack and stack[-1] is _CLASSDICT:
+                stack.pop()
+            stack.append(ast.Name(id=argval, ctx=ast.Load()))
+        elif op == "LOAD_ATTR":
+            obj = stack.pop()
+            stack.append(ast.Attribute(value=obj, attr=argval, ctx=ast.Load()))
+        elif op == "BINARY_OP":
+            if arg == _NB_SUBSCR:
+                s = stack.pop()
+                v = stack.pop()
+                stack.append(ast.Subscript(value=v, slice=s, ctx=ast.Load()))
+            elif arg == _NB_OR:
+                r = stack.pop()
+                lft = stack.pop()
+                stack.append(ast.BinOp(left=lft, op=ast.BitOr(), right=r))
+            else:
+                raise DecompileError(
+                    f"Unsupported BINARY_OP in listcomp: {arg}"
+                )
+        elif op == "BUILD_TUPLE":
+            n = argval
+            elts = stack[-n:] if n else []
+            if n:
+                del stack[-n:]
+            stack.append(ast.Tuple(elts=elts, ctx=ast.Load()))
+        elif op == "BUILD_LIST":
+            n = argval
+            elts = stack[-n:] if n else []
+            if n:
+                del stack[-n:]
+            stack.append(ast.List(elts=elts, ctx=ast.Load()))
+        elif op in ("NOT_TAKEN", "PUSH_NULL"):
+            pass
+        else:
+            raise DecompileError(f"Unsupported opcode in listcomp body: {op}")
+
+    raise DecompileError("LIST_APPEND not found in comprehension body")
+
+
+def _get_comp_loop_var(
+    instructions: list[dis.Instruction],
+    pc: int,
+) -> tuple[str, bool, int]:
+    """Extract loop variable from STORE_FAST or STORE_FAST_LOAD_FAST.
+
+    Returns (var_name, has_initial_load, new_pc).
+    """
+    store = instructions[pc]
+    if store.opname == "STORE_FAST":
+        return store.argval, False, pc + 1
+    if store.opname == "STORE_FAST_LOAD_FAST":
+        return store.argval[0], True, pc + 1
+    raise DecompileError(
+        f"Expected STORE_FAST after FOR_ITER, got {store.opname}"
+    )
+
+
+def _build_listcomp(
+    body: ast.expr,
+    filters: list[ast.expr],
+    var_name: str,
+    iterable: ast.expr,
+) -> ast.ListComp:
+    """Construct an ast.ListComp node."""
+    return ast.ListComp(
+        elt=body,
+        generators=[
+            ast.comprehension(
+                target=ast.Name(id=var_name, ctx=ast.Store()),
+                iter=iterable,
+                ifs=filters,
+                is_async=0,
+            )
+        ],
+    )
+
+
+def _decompile_listcomp_code(
+    code: types.CodeType,
+    iterable: ast.expr,
+) -> ast.ListComp:
+    """Decompile a separate <listcomp> code object (Pattern A).
+
+    Used for class body and method annotations where the comprehension
+    is compiled as its own code object, called via MAKE_FUNCTION + CALL.
+    """
+    instrs = list(dis.get_instructions(code))
+    off_to_idx = {i.offset: idx for idx, i in enumerate(instrs)}
+
+    # Skip preamble: COPY_FREE_VARS, RESUME, BUILD_LIST 0, LOAD_FAST .0
+    pc = 0
+    while pc < len(instrs):
+        op = instrs[pc].opname
+        if op in ("COPY_FREE_VARS", "RESUME", "BUILD_LIST"):
+            pc += 1
+        elif op == "LOAD_FAST" and instrs[pc].argval == ".0":
+            pc += 1
+            break
+        else:
+            break
+
+    assert instrs[pc].opname == "FOR_ITER", (
+        f"Expected FOR_ITER, got {instrs[pc].opname}"
+    )
+    pc += 1
+
+    var_name, has_load, pc = _get_comp_loop_var(instrs, pc)
+    body, filters, _ = _decompile_comp_body(
+        instrs, off_to_idx, pc, var_name, has_load
+    )
+    return _build_listcomp(body, filters, var_name, iterable)
+
+
+def _decompile_inline_comp(
+    instructions: list[dis.Instruction],
+    offset_to_idx: dict[int, int],
+    pc: int,
+    iterable: ast.expr,
+) -> tuple[ast.ListComp, int]:
+    """Decompile an inlined comprehension (Pattern B).
+
+    Used for module-level function annotations where the comprehension
+    loop runs directly inside the __annotate__ function.
+
+    Returns (ListComp, pc_after_cleanup).
+    """
+    # Skip preamble until FOR_ITER
+    while pc < len(instructions) and instructions[pc].opname != "FOR_ITER":
+        pc += 1
+
+    assert instructions[pc].opname == "FOR_ITER"
+    pc += 1
+
+    var_name, has_load, pc = _get_comp_loop_var(instructions, pc)
+    body, filters, pc = _decompile_comp_body(
+        instructions, offset_to_idx, pc, var_name, has_load
+    )
+
+    # Skip cleanup: JUMP_BACKWARD, END_FOR, POP_ITER, SWAP, STORE_FAST
+    _cleanup = {
+        "JUMP_BACKWARD",
+        "END_FOR",
+        "POP_ITER",
+        "SWAP",
+        "STORE_FAST",
+        "NOT_TAKEN",
+    }
+    while pc < len(instructions) and instructions[pc].opname in _cleanup:
+        pc += 1
+
+    return _build_listcomp(body, filters, var_name, iterable), pc
 
 
 def _decompile_bytecode(
@@ -239,8 +477,63 @@ def _run(
             result[key_node.value] = val_node
 
         elif op == "MAKE_FUNCTION":
-            stack.pop()
-            stack.append(_set_pos(ast.Constant(value="<function>"), instr))
+            top = stack.pop()
+            # Keep listcomp code objects as markers for GET_ITER
+            if (
+                isinstance(top, ast.Constant)
+                and isinstance(top.value, types.CodeType)
+                and top.value.co_name == "<listcomp>"
+            ):
+                stack.append(top)
+            else:
+                stack.append(_set_pos(ast.Constant(value="<function>"), instr))
+
+        elif op == "GET_ITER":
+            # Comprehension: pop iterable, detect Pattern A vs B
+            iterable_node = stack.pop()
+            if (
+                stack
+                and isinstance(stack[-1], ast.Constant)
+                and isinstance(stack[-1].value, types.CodeType)
+            ):
+                # Pattern A: separate code object
+                code_marker = stack.pop()
+                comp = _decompile_listcomp_code(
+                    code_marker.value, iterable_node
+                )
+                stack.append(comp)
+                # Skip the CALL instruction
+                while (
+                    pc < len(instructions) and instructions[pc].opname != "CALL"
+                ):
+                    pc += 1
+                pc += 1  # skip CALL itself
+            else:
+                # Pattern B: inlined comprehension
+                comp, pc = _decompile_inline_comp(
+                    instructions, offset_to_idx, pc, iterable_node
+                )
+                stack.append(comp)
+
+        elif op == "LIST_EXTEND":
+            source = stack.pop()
+            target = stack[-argval]
+            assert isinstance(target, ast.List)
+            target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
+
+        elif op == "LIST_APPEND":
+            item = stack.pop()
+            target = stack[-argval]
+            assert isinstance(target, ast.List)
+            target.elts.append(item)
+
+        elif op == "CALL_INTRINSIC_1":
+            if arg == _INTRINSIC_LIST_TO_TUPLE:
+                list_node = stack.pop()
+                assert isinstance(list_node, ast.List)
+                stack.append(ast.Tuple(elts=list_node.elts, ctx=ast.Load()))
+            else:
+                raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
 
         elif op == "TO_BOOL":
             # The test expression is on top of stack.  The next meaningful
@@ -485,8 +778,54 @@ def _run_expr(
                 elts = []
             stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
         elif op == "MAKE_FUNCTION":
-            stack.pop()
-            stack.append(_set_pos(ast.Constant(value="<function>"), instr))
+            top = stack.pop()
+            if (
+                isinstance(top, ast.Constant)
+                and isinstance(top.value, types.CodeType)
+                and top.value.co_name == "<listcomp>"
+            ):
+                stack.append(top)
+            else:
+                stack.append(_set_pos(ast.Constant(value="<function>"), instr))
+        elif op == "GET_ITER":
+            iterable_node = stack.pop()
+            if (
+                stack
+                and isinstance(stack[-1], ast.Constant)
+                and isinstance(stack[-1].value, types.CodeType)
+            ):
+                code_marker = stack.pop()
+                comp = _decompile_listcomp_code(
+                    code_marker.value, iterable_node
+                )
+                stack.append(comp)
+                while (
+                    pc < len(instructions) and instructions[pc].opname != "CALL"
+                ):
+                    pc += 1
+                pc += 1
+            else:
+                comp, pc = _decompile_inline_comp(
+                    instructions, offset_to_idx, pc, iterable_node
+                )
+                stack.append(comp)
+        elif op == "LIST_EXTEND":
+            source = stack.pop()
+            target = stack[-argval]
+            assert isinstance(target, ast.List)
+            target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
+        elif op == "LIST_APPEND":
+            item = stack.pop()
+            target = stack[-argval]
+            assert isinstance(target, ast.List)
+            target.elts.append(item)
+        elif op == "CALL_INTRINSIC_1":
+            if arg == _INTRINSIC_LIST_TO_TUPLE:
+                list_node = stack.pop()
+                assert isinstance(list_node, ast.List)
+                stack.append(ast.Tuple(elts=list_node.elts, ctx=ast.Load()))
+            else:
+                raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
         elif op in ("NOT_TAKEN", "PUSH_NULL"):
             pass
         else:
