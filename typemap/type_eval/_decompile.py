@@ -228,7 +228,9 @@ def _run(
             else:
                 # Tail-position: each branch independently finishes the
                 # annotation dict and returns.  Recursively run both
-                # branches, then merge with IfExp where values differ.
+                # branches, then merge — factoring shared structure so
+                # that e.g. list[int] vs list[str] becomes
+                # list[int if T else str] rather than wrapping at the top.
                 true_result: dict[str, ast.expr] = {}
                 _run(
                     instructions,
@@ -416,7 +418,12 @@ def _factor_ifexp(
 
     When the compiler duplicates surrounding context into both branches
     (e.g. ``list[int]`` vs ``list[str]`` for ``list[int if T else str]``),
-    we want ``Subscript(list, IfExp(...))`` not ``IfExp(..., Subscript(list,int), ...)``.
+    we reconstruct ``Subscript(list, IfExp(...))`` rather than wrapping at
+    the top level.
+
+    Note: ``list[int] if T else list[str]`` produces identical bytecode
+    to ``list[int if T else str]`` — the compiler hoists ``list`` before
+    the branch in both cases — so we always normalize to the inner form.
     """
     if ast.dump(true_val) == ast.dump(false_val):
         return true_val
@@ -477,12 +484,7 @@ def _merge_branch_results(
     false_branch: dict[str, ast.expr],
     test: ast.expr,
 ) -> None:
-    """Merge results from two tail-position if-expression branches.
-
-    Keys that appear in both branches with different values get an IfExp
-    pushed as deep as possible into shared structure.  Keys with identical
-    AST in both branches pass through unchanged.
-    """
+    """Merge results from two tail-position if-expression branches."""
     all_keys = list(true_branch.keys())
     for k in false_branch:
         if k not in true_branch:
