@@ -609,10 +609,10 @@ def _callable_type_to_signature(callable_type: object) -> inspect.Signature:
         else:
             kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
 
-        # Handle default value
+        # Handle default value from the 4th Param arg (D)
+        default_type = param_args[3] if len(param_args) > 3 else typing.Never
         default: typing.Any
-        if "default" in quals:
-            # We don't have the actual default value, use a sentinel
+        if default_type is not typing.Never:
             default = _DUMMY_DEFAULT
         else:
             default = inspect.Parameter.empty
@@ -661,10 +661,11 @@ def _signature_to_function(name: str, sig: inspect.Signature):
 
 
 def _is_pos_only(param):
-    name, _, quals = typing.get_args(param)
+    args = typing.get_args(param)
+    name, _, quals = args[0], args[1], args[2]
     qual_set = _get_quals(quals)
     return "positional" in qual_set or (
-        name is None and not (_get_quals(quals) & {"*", "**"})
+        name is None and not (qual_set & {"*", "**"})
     )
 
 
@@ -771,13 +772,14 @@ def _function_type_from_sig(sig, func, *, receiver_type):
             quals.append("keyword")
         if p.kind == inspect.Parameter.POSITIONAL_ONLY:
             quals.append("positional")
-        if p.default is not empty:
-            quals.append("default")
+        ann_type = _ann(ann)
+        has_default = p.default is not empty
         params.append(
             Param[
                 typing.Literal[p.name],
-                _ann(ann),
+                ann_type,
                 typing.Literal[*quals] if quals else typing.Never,
+                ann_type if has_default else typing.Never,
             ]
         )
 

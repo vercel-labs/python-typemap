@@ -198,23 +198,22 @@ class Member[
     type definer = D
 
 
-ParamQuals = Literal["*", "**", "keyword", "positional", "default"]
+ParamQuals = Literal["*", "**", "keyword", "positional"]
 
 
 @has_associated_types
-class Param[N: str | None, T, Q: ParamQuals = typing.Never]:
+class Param[N: str | None, T, Q: ParamQuals = typing.Never, D = typing.Never]:
     type name = N
     type type = T
     type quals = Q
+    type default = D
 
 
 type PosParam[N: str | None, T] = Param[N, T, Literal["positional"]]
-type PosDefaultParam[N: str | None, T] = Param[
-    N, T, Literal["positional", "default"]
-]
-type DefaultParam[N: str, T] = Param[N, T, Literal["default"]]
+type PosDefaultParam[N: str | None, T] = Param[N, T, Literal["positional"], T]
+type DefaultParam[N: str, T] = Param[N, T, typing.Never, T]
 type NamedParam[N: str, T] = Param[N, T, Literal["keyword"]]
-type NamedDefaultParam[N: str, T] = Param[N, T, Literal["keyword", "default"]]
+type NamedDefaultParam[N: str, T] = Param[N, T, Literal["keyword"], T]
 type ArgsParam[T] = Param[Literal[None], T, Literal["*"]]
 type KwargsParam[T] = Param[Literal[None], T, Literal["**"]]
 
@@ -236,6 +235,7 @@ class Params:
 type GetName[T: Member | Param] = T.name
 type GetType[T: Member | Param] = T.type
 type GetQuals[T: Member | Param] = T.quals
+type GetDefault[T: Param] = T.default
 type GetInit[T: Member] = T.init
 type GetDefiner[T: Member] = T.definer
 
