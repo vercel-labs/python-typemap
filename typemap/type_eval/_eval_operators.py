@@ -2,6 +2,7 @@ import collections
 import collections.abc
 import contextlib
 import dataclasses
+import enum
 import functools
 import inspect
 import itertools
@@ -613,7 +614,13 @@ def _callable_type_to_signature(callable_type: object) -> inspect.Signature:
         default_type = param_args[3] if len(param_args) > 3 else typing.Never
         default: typing.Any
         if default_type is not typing.Never:
-            default = _DUMMY_DEFAULT
+            if (
+                _typing_inspect.is_literal(default_type)
+                and len(default_type.__args__) == 1  # type: ignore[union-attr]
+            ):
+                default = default_type.__args__[0]  # type: ignore[union-attr]
+            else:
+                default = _DUMMY_DEFAULT
         else:
             default = inspect.Parameter.empty
 
@@ -774,12 +781,20 @@ def _function_type_from_sig(sig, func, *, receiver_type):
             quals.append("positional")
         ann_type = _ann(ann)
         has_default = p.default is not empty
+        if has_default:
+            v = p.default
+            if v is None or isinstance(v, (int, str, bytes, bool, enum.Enum)):
+                default_type = typing.Literal[(v,)]
+            else:
+                default_type = ann_type
+        else:
+            default_type = typing.Never
         params.append(
             Param[
                 typing.Literal[p.name],
                 ann_type,
                 typing.Literal[*quals] if quals else typing.Never,
-                ann_type if has_default else typing.Never,
+                default_type,
             ]
         )
 

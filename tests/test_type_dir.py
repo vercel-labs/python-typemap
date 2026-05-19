@@ -198,7 +198,7 @@ def test_type_dir_1a():
             fin: typing.Final[int]
             x: tests.test_type_dir.Wrapper[int | None]
             ordinary: str
-            def foo(self: Self, a: int | None, *, b: int = ...) -> dict[str, int]: ...
+            def foo(self: Self, a: int | None, *, b: int = 0) -> dict[str, int]: ...
             def base[Z](self: Self, a: int | Z | None, b: ~K) -> dict[str, int | Z]: ...
             @classmethod
             def cbase(cls: type[typing.Self], a: int | None, b: ~K) -> dict[str, int]: ...
@@ -387,7 +387,7 @@ def test_type_members_func_1():
 typing.Callable[\
 typemap.typing.Params[typemap.typing.Param[typing.Literal['self'], tests.test_type_dir.Base[int], typing.Never, typing.Never], \
 typemap.typing.Param[typing.Literal['a'], int | None, typing.Never, typing.Never], \
-typemap.typing.Param[typing.Literal['b'], int, typing.Literal['keyword'], int]], \
+typemap.typing.Param[typing.Literal['b'], int, typing.Literal['keyword'], typing.Literal[0]]], \
 dict[str, int]]"
     )
 
