@@ -6,7 +6,6 @@ from typing import (
     Union,
     ReadOnly,
     TypedDict,
-    Never,
     Self,
 )
 
@@ -151,13 +150,9 @@ type InitFnType[T] = typing.Member[
                     p.type,
                     # All arguments are keyword-only
                     Literal["keyword"],
-                    # It takes a default if a default is specified in the class
-                    p.type
-                    if not typing.IsAssignable[
-                        GetDefault[p.init],
-                        Never,
-                    ]
-                    else Never,
+                    # GetDefault is Never when there's no default, so use it
+                    # directly as D.
+                    GetDefault[p.init],
                 ]
                 for p in typing.Iter[typing.Attrs[T]]
             ],
@@ -268,7 +263,7 @@ def test_fastapi_like_0():
             name: str = Field(index=True)
             age: int | None = Field(default=None, index=True)
             secret_name: str = Field(hidden=True)
-            def __init__(self: Self, *, id: int | None = ..., name: str, age: int | None = ..., secret_name: str) -> None: ...
+            def __init__(self: Self, *, id: int | None = None, name: str, age: int | None = None, secret_name: str) -> None: ...
     """)
 
 
@@ -294,7 +289,7 @@ def test_fastapi_like_2():
             name: str
             age: int | None = None
             secret_name: str
-            def __init__(self: Self, *, name: str, age: int | None = ..., secret_name: str) -> None: ...
+            def __init__(self: Self, *, name: str, age: int | None = None, secret_name: str) -> None: ...
     """)
 
 
@@ -307,5 +302,5 @@ def test_fastapi_like_3():
             name: str | None = None
             age: int | None = None
             secret_name: str | None = None
-            def __init__(self: Self, *, name: str | None = ..., age: int | None = ..., secret_name: str | None = ...) -> None: ...
+            def __init__(self: Self, *, name: str | None = None, age: int | None = None, secret_name: str | None = None) -> None: ...
     """)
