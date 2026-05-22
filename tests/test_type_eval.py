@@ -157,7 +157,7 @@ def test_eval_types_4():
             [
                 Param[Literal["a"], int, Literal["positional"]],
                 Param[Literal["b"], int],
-                Param[Literal["c"], int, Never, int],
+                Param[Literal["c"], int, Literal["positional_or_keyword"], int],
                 Param[None, int, Literal["*"]],
                 Param[Literal["d"], int, Literal["keyword"]],
                 Param[Literal["e"], int, Literal["keyword"], int],
@@ -172,7 +172,7 @@ def test_eval_types_4():
             [
                 Param[Literal["a"], int, Literal["positional"]],
                 Param[Literal["b"], int],
-                Param[Literal["c"], int, Never, int],
+                Param[Literal["c"], int, Literal["positional_or_keyword"], int],
                 Param[None, int, Literal["*"]],
                 Param[Literal["d"], int, Literal["keyword"]],
                 Param[Literal["e"], int, Literal["keyword"], int],
@@ -1827,7 +1827,7 @@ def test_callable_to_signature_01():
         Params[
             Param[None, int],
             Param[Literal["b"], int],
-            Param[Literal["c"], int, Never, int],
+            Param[Literal["c"], int, Literal["positional_or_keyword"], int],
             Param[None, int, Literal["*"]],
             Param[Literal["d"], int, Literal["keyword"]],
             Param[Literal["e"], int, Literal["keyword"], int],
@@ -1857,6 +1857,19 @@ def test_callable_to_signature_multi_kind_error():
         int,
     ]
     with pytest.raises(TypeError, match="at most one"):
+        _callable_type_to_signature(callable_type)
+
+
+def test_callable_to_signature_never_kind_error():
+    from typemap.type_eval._eval_operators import _callable_type_to_signature
+
+    # Never is not a valid kind; the explicit "normal" kind is
+    # Literal["positional_or_keyword"].
+    callable_type = Callable[
+        Params[Param[Literal["x"], int, Never]],
+        int,
+    ]
+    with pytest.raises(TypeError, match="cannot be Never"):
         _callable_type_to_signature(callable_type)
 
 

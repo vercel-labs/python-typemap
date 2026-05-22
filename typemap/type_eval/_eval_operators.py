@@ -495,10 +495,13 @@ def _eval_Bool(tp, *, ctx):
 
 
 def _get_kind(kind_type) -> str | None:
-    # Extract the single kind from Literal["*"|"**"|"keyword"|"positional"]
-    # or Never. Multiple kinds in one Literal are an error.
+    # Extract the single kind from a Literal of one ParamKind value.
+    # Multiple kinds, or Never, are an error.
     if kind_type is typing.Never:
-        return None
+        raise TypeError(
+            "Param kind cannot be Never; "
+            "use Literal['positional_or_keyword'] for the default"
+        )
     if not _typing_inspect.is_literal(kind_type):
         return None
     kind_args = typing.get_args(kind_type)
@@ -582,7 +585,11 @@ def _callable_type_to_signature(callable_type: object) -> inspect.Signature:
 
         name_type = param_args[0]
         annotation = param_args[1]
-        kind_type = param_args[2] if len(param_args) > 2 else typing.Never
+        kind_type = (
+            param_args[2]
+            if len(param_args) > 2
+            else typing.Literal["positional_or_keyword"]
+        )
 
         # Extract name from Literal[name] or None
         name = _from_literal(name_type)
@@ -698,7 +705,11 @@ def _callable_type_to_method(name, typ, ctx):
         # We have to make class positional only if there is some other
         # positional only argument. Annoying!
         has_pos_only = any(_is_pos_only(p) for p in param_list)
-        kind = typing.Literal["positional"] if has_pos_only else typing.Never
+        kind = (
+            typing.Literal["positional"]
+            if has_pos_only
+            else typing.Literal["positional_or_keyword"]
+        )
         # Override the receiver type with type[Self].
         if name == "__init_subclass__" and isinstance(cls, typing.TypeVar):
             # For __init_subclass__ generic on cls: T, keep type[T]
