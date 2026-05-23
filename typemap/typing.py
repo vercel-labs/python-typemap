@@ -1,6 +1,7 @@
 # mypy: ignore-errors
 
 import contextvars
+import enum
 import typing
 import types
 
@@ -198,14 +199,21 @@ class Member[
     type definer = D
 
 
-ParamKind = Literal["*", "**", "keyword", "positional", "positional_or_keyword"]
+class ParamKind(enum.IntEnum):
+    """Parameter kind qualifiers, modeled on inspect._ParameterKind."""
+
+    POSITIONAL_ONLY = 0
+    POSITIONAL_OR_KEYWORD = 1
+    VAR_POSITIONAL = 2
+    KEYWORD_ONLY = 3
+    VAR_KEYWORD = 4
 
 
 @has_associated_types
 class Param[
     N: str | None,
     T,
-    K: ParamKind = Literal["positional_or_keyword"],
+    K: ParamKind = Literal[ParamKind.POSITIONAL_OR_KEYWORD],
     D = typing.Never,
 ]:
     type name = N
@@ -214,13 +222,17 @@ class Param[
     type default = D
 
 
-type PosParam[T] = Param[None, T, Literal["positional"]]
-type PosDefaultParam[T] = Param[None, T, Literal["positional"], T]
-type DefaultParam[N: str, T] = Param[N, T, Literal["positional_or_keyword"], T]
-type NamedParam[N: str, T] = Param[N, T, Literal["keyword"]]
-type NamedDefaultParam[N: str, T] = Param[N, T, Literal["keyword"], T]
-type ArgsParam[T] = Param[None, T, Literal["*"]]
-type KwargsParam[T] = Param[None, T, Literal["**"]]
+type PosParam[T] = Param[None, T, Literal[ParamKind.POSITIONAL_ONLY]]
+type PosDefaultParam[T] = Param[None, T, Literal[ParamKind.POSITIONAL_ONLY], T]
+type DefaultParam[N: str, T] = Param[
+    N, T, Literal[ParamKind.POSITIONAL_OR_KEYWORD], T
+]
+type NamedParam[N: str, T] = Param[N, T, Literal[ParamKind.KEYWORD_ONLY]]
+type NamedDefaultParam[N: str, T] = Param[
+    N, T, Literal[ParamKind.KEYWORD_ONLY], T
+]
+type ArgsParam[T] = Param[None, T, Literal[ParamKind.VAR_POSITIONAL]]
+type KwargsParam[T] = Param[None, T, Literal[ParamKind.VAR_KEYWORD]]
 
 
 class Params:

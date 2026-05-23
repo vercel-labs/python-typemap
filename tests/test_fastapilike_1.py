@@ -22,6 +22,7 @@ from typemap_extensions import (
     Member,
     Members,
     Param,
+    ParamKind,
     Params,
 )
 
@@ -57,7 +58,7 @@ type InitFnType[T] = Member[
                 Param[
                     p.name,
                     DropAnnotations[p.type],
-                    Literal["keyword"],
+                    Literal[ParamKind.KEYWORD_ONLY],
                     DropAnnotations[p.type]
                     if IsAssignable[
                         Literal[PropQuals.HAS_DEFAULT],

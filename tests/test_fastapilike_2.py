@@ -149,7 +149,7 @@ type InitFnType[T] = typing.Member[
                     p.name,
                     p.type,
                     # All arguments are keyword-only
-                    Literal["keyword"],
+                    Literal[typing.ParamKind.KEYWORD_ONLY],
                     # GetDefault is Never when there's no default, so use it
                     # directly as D.
                     GetDefault[p.init],

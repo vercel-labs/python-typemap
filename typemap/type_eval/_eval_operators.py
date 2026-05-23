@@ -45,6 +45,7 @@ from typemap.typing import (
     NewTypedDict,
     Overloaded,
     Param,
+    ParamKind,
     Params,
     RaiseError,
     Slice,
@@ -494,13 +495,13 @@ def _eval_Bool(tp, *, ctx):
 ##################################################################
 
 
-def _get_kind(kind_type) -> str | None:
-    # Extract the single kind from a Literal of one ParamKind value.
+def _get_kind(kind_type) -> ParamKind | None:
+    # Extract the single ParamKind from a Literal of one value.
     # Multiple kinds, or Never, are an error.
     if kind_type is typing.Never:
         raise TypeError(
             "Param kind cannot be Never; "
-            "use Literal['positional_or_keyword'] for the default"
+            "use Literal[ParamKind.POSITIONAL_OR_KEYWORD] for the default"
         )
     if not _typing_inspect.is_literal(kind_type):
         return None
@@ -534,8 +535,16 @@ def _unwrap_params(param_types) -> list:
 
     if param_types is ...:
         return [
-            Param[typing.Literal[None], typing.Any, typing.Literal["*"]],
-            Param[typing.Literal[None], typing.Any, typing.Literal["**"]],
+            Param[
+                typing.Literal[None],
+                typing.Any,
+                typing.Literal[ParamKind.VAR_POSITIONAL],
+            ],
+            Param[
+                typing.Literal[None],
+                typing.Any,
+                typing.Literal[ParamKind.VAR_KEYWORD],
+            ],
         ]
 
     if isinstance(param_types, (list, tuple)):
@@ -588,7 +597,7 @@ def _callable_type_to_signature(callable_type: object) -> inspect.Signature:
         kind_type = (
             param_args[2]
             if len(param_args) > 2
-            else typing.Literal["positional_or_keyword"]
+            else typing.Literal[ParamKind.POSITIONAL_OR_KEYWORD]
         )
 
         # Extract name from Literal[name] or None
@@ -598,20 +607,20 @@ def _callable_type_to_signature(callable_type: object) -> inspect.Signature:
 
         # Determine parameter kind and default
         kind: inspect._ParameterKind
-        if param_kind == "**":
+        if param_kind is ParamKind.VAR_KEYWORD:
             kind = inspect.Parameter.VAR_KEYWORD
             name = name or "kwargs"
-        elif param_kind == "*":
+        elif param_kind is ParamKind.VAR_POSITIONAL:
             kind = inspect.Parameter.VAR_POSITIONAL
             name = name or "args"
             # XXX: not sure we need this
             saw_keyword_only = True
-        elif param_kind == "keyword":
+        elif param_kind is ParamKind.KEYWORD_ONLY:
             kind = inspect.Parameter.KEYWORD_ONLY
             saw_keyword_only = True
-        elif param_kind == "positional" or name is None:
+        elif param_kind is ParamKind.POSITIONAL_ONLY or name is None:
             kind = inspect.Parameter.POSITIONAL_ONLY
-        elif param_kind == "positional_or_keyword":
+        elif param_kind is ParamKind.POSITIONAL_OR_KEYWORD:
             kind = inspect.Parameter.POSITIONAL_OR_KEYWORD
         elif saw_keyword_only:
             kind = inspect.Parameter.KEYWORD_ONLY
@@ -678,7 +687,10 @@ def _is_pos_only(param):
     args = typing.get_args(param)
     name, _, kind_type = args[0], args[1], args[2]
     kind = _get_kind(kind_type)
-    return kind == "positional" or (name is None and kind not in ("*", "**"))
+    return kind is ParamKind.POSITIONAL_ONLY or (
+        name is None
+        and kind not in (ParamKind.VAR_POSITIONAL, ParamKind.VAR_KEYWORD)
+    )
 
 
 def _callable_type_to_method(name, typ, ctx):
@@ -706,9 +718,9 @@ def _callable_type_to_method(name, typ, ctx):
         # positional only argument. Annoying!
         has_pos_only = any(_is_pos_only(p) for p in param_list)
         kind = (
-            typing.Literal["positional"]
+            typing.Literal[ParamKind.POSITIONAL_ONLY]
             if has_pos_only
-            else typing.Literal["positional_or_keyword"]
+            else typing.Literal[ParamKind.POSITIONAL_OR_KEYWORD]
         )
         # Override the receiver type with type[Self].
         if name == "__init_subclass__" and isinstance(cls, typing.TypeVar):
@@ -779,17 +791,7 @@ def _function_type_from_sig(sig, func, *, receiver_type):
                 else:
                     specified_receiver = ann
 
-        kinds = []
-        if p.kind == inspect.Parameter.VAR_POSITIONAL:
-            kinds.append("*")
-        if p.kind == inspect.Parameter.VAR_KEYWORD:
-            kinds.append("**")
-        if p.kind == inspect.Parameter.KEYWORD_ONLY:
-            kinds.append("keyword")
-        if p.kind == inspect.Parameter.POSITIONAL_ONLY:
-            kinds.append("positional")
-        if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
-            kinds.append("positional_or_keyword")
+        kind = ParamKind(p.kind.value)
         ann_type = _ann(ann)
         has_default = p.default is not empty
         if has_default:
@@ -804,7 +806,7 @@ def _function_type_from_sig(sig, func, *, receiver_type):
             Param[
                 typing.Literal[p.name],
                 ann_type,
-                typing.Literal[*kinds] if kinds else typing.Never,
+                typing.Literal[kind],
                 default_type,
             ]
         )
@@ -1085,8 +1087,16 @@ def _get_defaults(base_head):
     if base_head is collections.abc.Callable:
         return (
             Params[
-                Param[typing.Literal[None], typing.Any, typing.Literal["*"]],
-                Param[typing.Literal[None], typing.Any, typing.Literal["**"]],
+                Param[
+                    typing.Literal[None],
+                    typing.Any,
+                    typing.Literal[ParamKind.VAR_POSITIONAL],
+                ],
+                Param[
+                    typing.Literal[None],
+                    typing.Any,
+                    typing.Literal[ParamKind.VAR_KEYWORD],
+                ],
             ],
             typing.Any,
         )
