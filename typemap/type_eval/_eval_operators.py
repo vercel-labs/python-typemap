@@ -121,7 +121,9 @@ def get_annotated_type_hints(cls, *, ctx, attrs_only=False, **kwargs):
     for abox in reversed(box.mro):
         acls = abox.alias_type()
 
-        annos, _ = _apply_generic.get_local_defns(abox)
+        annos, _ = _apply_generic.get_local_defns(
+            abox, include_methods=not attrs_only
+        )
         for k, ty in annos.items():
             quals = set()
 
