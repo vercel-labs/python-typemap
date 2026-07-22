@@ -323,6 +323,8 @@ def _resolved_function_signature(func, args):
 
 def get_local_defns(
     boxed: Boxed,
+    *,
+    include_methods: bool = True,
 ) -> tuple[
     dict[str, Any],
     dict[
@@ -343,7 +345,7 @@ def get_local_defns(
 
         stuff = inspect.unwrap(orig)
 
-        if isinstance(stuff, types.FunctionType):
+        if include_methods and isinstance(stuff, types.FunctionType):
             local_fn: Any = None
 
             # TODO: This annos_ok thing is a hack because processing
