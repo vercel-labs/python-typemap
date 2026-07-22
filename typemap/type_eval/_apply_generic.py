@@ -437,6 +437,7 @@ def flatten_class_new_proto(cls: type) -> type:
 
     nt.__name__ = f'{cls.__name__}{args_str}'
     nt.__qualname__ = f'{cls.__qualname__}{args_str}'
+    nt.__module__ = cls.__module__
     del nt.__subclasshook__
 
     return nt

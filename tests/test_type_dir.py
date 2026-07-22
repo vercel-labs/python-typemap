@@ -190,13 +190,16 @@ def test_type_dir_link_2():
 def test_type_dir_1a():
     d = eval_typing(Final)
 
-    assert format_helper.format_class(d) == textwrap.dedent("""\
+    # 3.15 inserts the module name in a place that 3.14 doesn't, so replace
+    assert format_helper.format_class(d).replace(
+        "tests.test_type_dir.", ""
+    ) == textwrap.dedent("""\
         class Final:
             last: int | typing.Literal[True]
             iii: str | int | typing.Literal['gotcha!']
             t: dict[str, str | int | typing.Literal['gotcha!']]
             fin: typing.Final[int]
-            x: tests.test_type_dir.Wrapper[int | None]
+            x: Wrapper[int | None]
             ordinary: str
             def foo(self: Self, a: int | None, *, b: int = 0) -> dict[str, int]: ...
             def base[Z](self: Self, a: int | Z | None, b: ~K) -> dict[str, int | Z]: ...

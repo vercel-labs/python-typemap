@@ -1901,6 +1901,7 @@ def test_new_protocol_with_methods_01():
         def static_method(x: int) -> int: ...
 
     res = eval_typing(IndirectProtocol[C])
+
     fmt = format_helper.format_class(res)
     assert fmt == textwrap.dedent("""\
         class IndirectProtocol[tests.test_type_eval.test_new_protocol_with_methods_01.<locals>.C]:

@@ -144,7 +144,8 @@ def test_dataclass_like_1():
     tgt = eval_typing(Hero)
     fmt = format_helper.format_class(tgt)
 
-    assert fmt == textwrap.dedent("""\
+    # 3.15 inserts the module name in a place that 3.14 doesn't, so replace
+    assert fmt.replace("tests.test_dataclass_like.", "") == textwrap.dedent("""\
         class Hero:
             id: int | None = None
             name: str
