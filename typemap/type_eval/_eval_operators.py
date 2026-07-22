@@ -1334,11 +1334,13 @@ def _eval_NewProtocol(*etyps: Member, ctx):
     # If the type evaluation context
     ctx = type_eval._get_current_context()
     if ctx.current_generic_alias:
+        module_name = ctx.current_generic_alias.__module__
         if isinstance(ctx.current_generic_alias, types.GenericAlias):
             name = str(ctx.current_generic_alias)
         else:
             name = f"{ctx.current_generic_alias.__name__}[...]"
-        module_name = ctx.current_generic_alias.__module__
+        if name.startswith(f'{module_name}.'):
+            name = name[len(module_name) + 1 :]
 
     dct["__module__"] = module_name
 
