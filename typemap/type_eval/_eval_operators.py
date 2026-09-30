@@ -24,12 +24,14 @@ from typemap.typing import (
     Attrs,
     Bool,
     Capitalize,
+    _Cond,
     DropAnnotations,
     FromUnion,
     GenericCallable,
     GetAnnotations,
     GetArg,
     GetArgs,
+    _GetAssociated,
     GetMember,
     GetMemberType,
     GetSpecialAttr,
@@ -53,8 +55,15 @@ from typemap.typing import (
     Concat,
     Uncapitalize,
     UpdateClass,
+    _UnpackMap,
     Uppercase,
+    _All,
+    _And,
+    _Any,
     _BoolLiteral,
+    _Not,
+    _Or,
+    _HasAssociatedTypesGenericAlias,
 )
 
 ##################################################################
@@ -490,6 +499,56 @@ def _eval_bool_tp(tp, ctx):
 @_lift_evaluated
 def _eval_Bool(tp, *, ctx):
     return _eval_bool_tp(tp, ctx)
+
+
+def _eval_test(tp, ctx) -> bool:
+    return bool(_eval_bool_tp(_unwrap_anno(_eval_types(tp, ctx)), ctx))
+
+
+@type_eval.register_evaluator(_Not, lazy=True)
+def _eval_Not(tp, *, ctx):
+    return _BoolLiteral[not _eval_test(tp, ctx)]
+
+
+@type_eval.register_evaluator(_And, lazy=True)
+def _eval_And(*tps, ctx):
+    return _BoolLiteral[all(_eval_test(tp, ctx) for tp in tps)]
+
+
+@type_eval.register_evaluator(_Or, lazy=True)
+def _eval_Or(*tps, ctx):
+    return _BoolLiteral[any(_eval_test(tp, ctx) for tp in tps)]
+
+
+# These aren't lazy, so that the _UnpackMap gets expanded into the arguments
+@type_eval.register_evaluator(_Any)
+def _eval_Any(*tps, ctx):
+    return _BoolLiteral[any(_eval_test(tp, ctx) for tp in tps)]
+
+
+@type_eval.register_evaluator(_All)
+def _eval_All(*tps, ctx):
+    return _BoolLiteral[all(_eval_test(tp, ctx) for tp in tps)]
+
+
+@type_eval.register_evaluator(_Cond, lazy=True)
+def _eval_Cond(cond, tif, telse, *, ctx):
+    return _eval_types(tif if _eval_test(cond, ctx) else telse, ctx)
+
+
+@type_eval.register_evaluator(_UnpackMap, lazy=True)
+def _eval_UnpackMap(tps, tv, tres, tcond=typing.Literal[True], *, ctx):
+    if not isinstance(tv, typing.TypeVar):
+        raise TypeError(f"_UnpackMap variable must be a TypeVar, got {tv}")
+
+    results = []
+    for tp in _eval_Iter(tps, ctx=ctx):
+        if _eval_test(_apply_generic.substitute(tcond, {tv: tp}), ctx):
+            # _eval_args so that an Unpack or an _UnpackMap gets expanded
+            results.extend(
+                _eval_args([_apply_generic.substitute(tres, {tv: tp})], ctx)
+            )
+    return typing.Unpack[tuple[*results]]
 
 
 ##################################################################
@@ -1144,6 +1203,20 @@ def _eval_GetArgs(tp, base, *, ctx) -> typing.Any:
         return tuple[args[0]]  # type: ignore[valid-type]
 
     return tuple[*args]  # type: ignore[valid-type]
+
+
+@type_eval.register_evaluator(_GetAssociated)
+@_lift_over_unions
+def _eval_GetAssociated(tp, name, *, ctx) -> typing.Any:
+    name = _from_literal(name)
+    if not (
+        isinstance(tp, _HasAssociatedTypesGenericAlias)
+        and isinstance(getattr(tp.__origin__, name, None), typing.TypeAliasType)
+    ):
+        raise TypeMapError(
+            f"_GetAssociated: {tp!r} has no associated type {name!r}"
+        )
+    return _eval_types(getattr(tp, name), ctx)
 
 
 @type_eval.register_evaluator(GetSpecialAttr)

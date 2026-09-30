@@ -27,7 +27,17 @@ import pytest
 
 from typemap.type_eval import _ensure_context, eval_typing
 from typemap.type_eval._eval_operators import TypeMapError
-from typemap.typing import _BoolLiteral
+from typemap.typing import (
+    _All,
+    _And,
+    _Any,
+    _BoolLiteral,
+    _Cond,
+    _GetAssociated,
+    _Not,
+    _Or,
+    _UnpackMap,
+)
 
 from typemap_extensions import (
     Attrs,
@@ -1668,6 +1678,229 @@ def test_eval_bool_05():
 
     d = eval_typing(IsIntLiteral[str])
     assert d == Literal[False]
+
+
+type OnlyIntToSetCond[T] = _Cond[IsAssignable[T, int], set[T], T]
+type CondIsIntLiteral[T] = _Cond[IsIntBool[T], Literal[True], Literal[False]]
+
+
+def test_eval_cond_01():
+    assert eval_typing(_Cond[Literal[True], int, str]) is int
+    assert eval_typing(_Cond[Literal[False], int, str]) is str
+    assert eval_typing(_Cond[Never, int, str]) is str
+    assert eval_typing(_Cond[int, int, str]) is str
+    assert eval_typing(_Cond[Literal[False] | Literal[True], int, str]) is int
+
+    assert eval_typing(OnlyIntToSetCond[int]) == set[int]
+    assert eval_typing(OnlyIntToSetCond[str]) is str
+
+    assert eval_typing(CondIsIntLiteral[int]) == Literal[True]
+    assert eval_typing(CondIsIntLiteral[str]) == Literal[False]
+
+
+def test_eval_cond_02():
+    # Only the selected branch is evaluated
+    d = eval_typing(_Cond[Literal[True], int, RaiseError[Literal["nope"]]])
+    assert d is int
+
+    with pytest.raises(TypeMapError, match="nope"):
+        eval_typing(_Cond[Literal[False], int, RaiseError[Literal["nope"]]])
+
+
+def test_eval_bool_ops_01():
+    t, f = Literal[True], Literal[False]
+    nope = RaiseError[Literal["nope"]]
+
+    assert eval_typing(_Not[t]) == f
+    assert eval_typing(_Not[int]) == t
+    assert eval_typing(_And[t, IsAssignable[bool, int]]) == t
+    assert eval_typing(_And[t, f, t]) == f
+    assert eval_typing(_Or[f, IsAssignable[int, bool]]) == f
+    assert eval_typing(_Or[f, t]) == t
+
+    # Short circuiting
+    assert eval_typing(_And[f, nope]) == f
+    assert eval_typing(_Or[t, nope]) == t
+    with pytest.raises(TypeMapError, match="nope"):
+        eval_typing(_And[t, nope])
+
+    # Substitution
+    type NotInt[X] = _Not[IsAssignable[X, int]]
+    assert eval_typing(NotInt[str]) == t
+    assert eval_typing(NotInt[bool]) == f
+
+
+def test_eval_bool_ops_02():
+    t, f = Literal[True], Literal[False]
+    type AnyInt[Ts] = _Any[_UnpackMap[Ts, T, IsAssignable[T, int]]]
+    type AllInt[Ts] = _All[_UnpackMap[Ts, T, IsAssignable[T, int]]]
+
+    assert eval_typing(AnyInt[tuple[str, bool]]) == t
+    assert eval_typing(AnyInt[tuple[str, float]]) == f
+    assert eval_typing(AnyInt[tuple[()]]) == f
+    assert eval_typing(AllInt[tuple[int, bool]]) == t
+    assert eval_typing(AllInt[tuple[int, str]]) == f
+    assert eval_typing(AllInt[tuple[()]]) == t
+
+    with pytest.raises(TypeError, match="_UnpackMap"):
+        _Any[tuple[t]]
+    with pytest.raises(TypeError, match="_UnpackMap"):
+        _All[t]
+
+
+type CondLast[T] = _Cond[
+    IsEquivalent[Length[T], Literal[1]],
+    GetArg[T, tuple, Literal[0]],
+    CondLast[Slice[T, Literal[1], None]],
+]
+
+
+def test_eval_cond_03():
+    assert eval_typing(CondLast[tuple[int]]) is int
+    assert eval_typing(CondLast[tuple[int, str, float]]) is float
+
+
+type ListAll[Ts] = tuple[_UnpackMap[Ts, T, list[T]]]
+type ListInts[Ts] = tuple[_UnpackMap[Ts, T, list[T], IsAssignable[T, int]]]
+type SetAttrs[C] = tuple[
+    _UnpackMap[
+        Attrs[C],
+        T,
+        Member[
+            _GetAssociated[T, Literal["name"]],
+            set[_GetAssociated[T, Literal["type"]]],
+        ],
+    ]
+]
+type SetAttrsComp[C] = tuple[
+    *[Member[m.name, set[m.type]] for m in Iter[Attrs[C]]]
+]
+
+
+def test_eval_unpack_map_01():
+    assert eval_typing(ListAll[tuple[int, str]]) == tuple[list[int], list[str]]
+    assert eval_typing(ListAll[tuple[()]]) == tuple[()]
+    assert (
+        eval_typing(tuple[bool, _UnpackMap[tuple[int, str], T, T], float])
+        == tuple[bool, int, str, float]
+    )
+    assert eval_typing(_UnpackMap[tuple[int, str], T, T] | None) == (
+        int | str | None
+    )
+
+
+def test_eval_unpack_map_02():
+    assert (
+        eval_typing(ListInts[tuple[int, str, bool, float]])
+        == tuple[list[int], list[bool]]
+    )
+    assert eval_typing(ListInts[tuple[str]]) == tuple[()]
+
+
+def test_eval_unpack_map_03():
+    class C:
+        a: int
+        b: str
+
+    assert eval_typing(SetAttrs[C]) == eval_typing(SetAttrsComp[C])
+
+
+def test_eval_unpack_map_04():
+    # Only selected elements are evaluated
+    d = eval_typing(
+        tuple[
+            _UnpackMap[
+                tuple[int, str],
+                T,
+                _Cond[IsAssignable[T, int], T, RaiseError[Literal["nope"]]],
+                IsAssignable[T, int],
+            ]
+        ]
+    )
+    assert d == tuple[int]
+
+    with pytest.raises(TypeError, match="TypeVar"):
+        eval_typing(tuple[_UnpackMap[tuple[int], int, int]])
+
+
+def test_eval_unpack_map_05():
+    d = eval_typing(tuple[_UnpackMap[tuple[int, str], T, Callable[[T], T]]])
+    assert d == tuple[Callable[[int], int], Callable[[str], str]]
+
+    d = eval_typing(
+        tuple[_UnpackMap[tuple[int, str], T, Annotated[list[T], "x"]]]
+    )
+    assert d == tuple[Annotated[list[int], "x"], Annotated[list[str], "x"]]
+
+
+def test_eval_unpack_map_06():
+    # Nested UnpackMaps work like comprehensions with multiple fors
+    A = TypeVar("A")
+    B = TypeVar("B")
+
+    d = eval_typing(
+        tuple[
+            _UnpackMap[
+                tuple[int, str],
+                A,
+                _UnpackMap[tuple[bool, float], B, tuple[A, B]],
+            ]
+        ]
+    )
+    assert d == tuple[*[tuple[a, b] for a in (int, str) for b in (bool, float)]]
+
+    d = eval_typing(
+        tuple[
+            _UnpackMap[
+                tuple[tuple[int, str], tuple[()], tuple[bool]],
+                A,
+                _UnpackMap[A, B, list[B]],
+            ]
+        ]
+    )
+    assert d == tuple[list[int], list[str], list[bool]]
+
+    d = eval_typing(
+        tuple[
+            _UnpackMap[
+                tuple[int, str],
+                A,
+                _UnpackMap[tuple[int, str], B, tuple[A, B], IsEquivalent[A, B]],
+            ]
+        ]
+    )
+    assert d == tuple[tuple[int, int], tuple[str, str]]
+
+
+def test_eval_get_associated_01():
+    M = Member[Literal["a"], int]
+    assert eval_typing(_GetAssociated[M, Literal["name"]]) == Literal["a"]
+    assert eval_typing(_GetAssociated[M, Literal["type"]]) is int
+    assert eval_typing(_GetAssociated[M, Literal["quals"]]) is Never
+
+    P = Param[Literal["x"], str]
+    assert (
+        eval_typing(_GetAssociated[P, Literal["kind"]])
+        == Literal[ParamKind.POSITIONAL_OR_KEYWORD]
+    )
+
+    d = eval_typing(
+        _GetAssociated[M | Member[Literal["b"], str], Literal["type"]]
+    )
+    assert d == int | str
+
+    class C:
+        x: int
+
+    d = eval_typing(
+        _GetAssociated[GetMember[C, Literal["x"]], Literal["definer"]]
+    )
+    assert d is C
+
+    with pytest.raises(TypeMapError, match="no associated type"):
+        eval_typing(_GetAssociated[int, Literal["name"]])
+    with pytest.raises(TypeMapError, match="no associated type"):
+        eval_typing(_GetAssociated[M, Literal["nope"]])
 
 
 def test_eval_bool_literal_01():

@@ -290,6 +290,16 @@ class GetSpecialAttr[T: type, Attr: str]:
     pass
 
 
+class _GetAssociated[T, Name: str]:
+    """_GetAssociated[T, Name]: Fetch the associated type Name of T.
+
+    Equivalent to ``T.<Name>``, for classes decorated with
+    has_associated_types (like Member and Param).
+    """
+
+    pass
+
+
 class Length[S: tuple]:
     pass
 
@@ -391,6 +401,56 @@ def IsEquivalent(self, tps):
 @_SpecialForm
 def Bool(self, tp):
     return _BoolGenericAlias(self, tp)
+
+
+@_SpecialForm
+def _Not(self, tp):
+    return _BoolGenericAlias(self, tp)
+
+
+@_SpecialForm
+def _And(self, tps):
+    return _BoolGenericAlias(self, tps)
+
+
+@_SpecialForm
+def _Or(self, tps):
+    return _BoolGenericAlias(self, tps)
+
+
+@_SpecialForm
+def _Any(self, tp):
+    """_Any[_UnpackMap[...]]: Equivalent to ``any(...)``"""
+    if typing.get_origin(tp) is not _UnpackMap:
+        raise TypeError(f"_Any expected an _UnpackMap, got {tp!r}")
+    return _BoolGenericAlias(self, tp)
+
+
+@_SpecialForm
+def _All(self, tp):
+    """_All[_UnpackMap[...]]: Equivalent to ``all(...)``"""
+    if typing.get_origin(tp) is not _UnpackMap:
+        raise TypeError(f"_All expected an _UnpackMap, got {tp!r}")
+    return _BoolGenericAlias(self, tp)
+
+
+class _Cond[B, T, F]:
+    """_Cond[B, T, F]: Equivalent to ``T if Bool[B] else F``.
+
+    Only the selected branch is evaluated.
+    """
+
+    pass
+
+
+class _UnpackMap[Ts, T, R, C = Literal[True]]:
+    """_UnpackMap[Ts, T, R, C]: Equivalent to ``*[R for T in Iter[Ts] if C]``.
+
+    T must be a TypeVar, which is bound to each element of Ts in turn
+    while evaluating R and C.
+    """
+
+    pass
 
 
 class _BoolLiteralGenericAlias(_LiteralGenericAlias, _root=True):
