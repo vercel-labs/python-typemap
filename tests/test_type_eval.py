@@ -16,6 +16,8 @@ from typing import (
     Self,
     Tuple,
     TypeVar,
+    TypeVarTuple,
+    Unpack,
     Union,
     get_args,
     overload,
@@ -2736,3 +2738,22 @@ def test_raise_error_with_literal_types():
         eval_typing(
             RaiseError[Literal["Shape mismatch"], Literal[4], Literal[3]]
         )
+
+
+def test_substitute_01():
+    from typemap.type_eval._apply_generic import substitute
+
+    U = TypeVar("U")
+    Ts = TypeVarTuple("Ts")
+    args = {T: int, Ts: tuple[int, str]}
+
+    assert substitute(list[T], args) == list[int]
+    assert substitute(T | None, args) == int | None
+    assert substitute(Callable[[T], U], args) == Callable[[int], U]
+    assert substitute(Annotated[T, "x"], args) == Annotated[int, "x"]
+    assert substitute(Annotated[T, {}], args) == Annotated[int, {}]
+    assert substitute(Unpack[Ts], args) == Unpack[tuple[int, str]]
+    assert substitute(IsAssignable[T, U], args) == IsAssignable[int, U]
+    assert substitute(tuple[T, *Ts], args) == tuple[int, int, str]
+    assert substitute(Callable[[*Ts], T], args) == Callable[[int, str], int]
+    assert substitute(tuple[U, *Ts], {T: int}) == tuple[U, *Ts]
