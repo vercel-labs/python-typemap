@@ -2,7 +2,15 @@
 
 import pytest
 
-from typing import Callable, Generic, Literal, Self, TypeVar
+from typing import (
+    Callable,
+    Generic,
+    Literal,
+    Self,
+    TypeVar,
+    TypeVarTuple,
+    Unpack,
+)
 
 from typemap.type_eval import eval_call_with_types
 from typemap_extensions import (
@@ -360,3 +368,25 @@ def test_eval_call_with_types_member_06():
         GetCallableMember[C[int], Literal["invoke"]], C[int], str
     )
     assert res == C[str]
+
+
+def test_eval_call_with_types_var_positional_tvt_01():
+    def f[*Ts](*args: *Ts) -> tuple[int, *Ts, str]: ...
+
+    assert eval_call_with_types(f, int, str) == tuple[int, int, str, str]
+    assert eval_call_with_types(f) == tuple[int, str]
+
+
+def test_eval_call_with_types_var_positional_tvt_02():
+    Ts = TypeVarTuple("Ts")
+    star = Param[Literal["args"], Unpack[Ts], Literal[ParamKind.VAR_POSITIONAL]]
+
+    res = eval_call_with_types(
+        Callable[Params[star], tuple[int, *Ts, str]], int, str
+    )
+    assert res == tuple[int, int, str, str]
+
+    res = eval_call_with_types(
+        Callable[Params[star], Callable[[*Ts], int]], int, str
+    )
+    assert res == Callable[[int, str], int]

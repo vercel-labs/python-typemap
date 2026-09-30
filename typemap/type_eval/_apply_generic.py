@@ -6,8 +6,6 @@ import sys
 import types
 import typing
 
-from typing import _GenericAlias as typing_GenericAlias  # type: ignore [attr-defined]  # noqa: PLC2701
-
 
 from . import _eval_typing
 from . import _typing_inspect
@@ -79,17 +77,29 @@ class Boxed:
             b.dump(_level=_level + 1)
 
 
+def _subst_arg(param, args):
+    is_tvt = isinstance(param, typing.TypeVarTuple)
+    if param not in args:
+        return typing.Unpack[param] if is_tvt else param
+    arg = args[param]
+    if is_tvt and typing.get_origin(arg) is tuple:
+        return typing.Unpack[arg]
+    return arg
+
+
 def substitute(ty, args):
-    if ty in args:
-        return args[ty]
-    elif isinstance(
-        ty, (typing_GenericAlias, types.GenericAlias, types.UnionType)
-    ):
-        return ty.__origin__[*[substitute(t, args) for t in ty.__args__]]
-    elif isinstance(ty, list):
-        return [substitute(t, args) for t in ty]
-    else:
+    if isinstance(ty, (typing.TypeVar, typing.TypeVarTuple, typing.ParamSpec)):
+        return args.get(ty, ty)
+    elif typing.get_origin(ty) is typing.Unpack:
+        return typing.Unpack[substitute(typing.get_args(ty)[0], args)]
+
+    # Lean on typing's own substitution machinery, which knows how to
+    # handle Callable, Annotated, etc., by wrapping ty in a tuple.
+    wrapped: Any = tuple[ty]
+    params = wrapped.__parameters__
+    if not any(p in args for p in params):
         return ty
+    return wrapped[*[_subst_arg(p, args) for p in params]].__args__[0]
 
 
 def box(cls: type[Any]) -> Boxed:
