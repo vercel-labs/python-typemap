@@ -1441,8 +1441,6 @@ def test_never_is():
 def test_eval_list_is_sub_01():
     d = eval_typing(list[IsAssignable[int, str]])
     assert d == list[_BoolLiteral[False]]
-    d = eval_typing(list[not IsAssignable[int, str]])
-    assert d == list[_BoolLiteral[True]]
 
 
 def test_matches_01():

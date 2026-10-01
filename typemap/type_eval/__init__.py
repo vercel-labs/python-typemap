@@ -3,7 +3,6 @@ from ._eval_typing import (
     _get_current_context,
     _ensure_context,
     register_evaluator,
-    StuckException,
     _EvalProxy,
 )
 from ._apply_generic import flatten_class
@@ -11,6 +10,7 @@ from ._apply_generic import flatten_class
 # XXX: this needs to go second due to nasty circularity -- try to fix that!!
 from ._eval_call import eval_call, eval_call_with_types
 from ._subtype import issubtype
+from ._type_ast import type_ast_to_type
 
 # This one is imported for registering handlers
 from . import _eval_operators  # noqa
@@ -25,8 +25,8 @@ __all__ = (
     "eval_call_with_types",
     "flatten_class",
     "issubtype",
+    "type_ast_to_type",
     "TypeMapError",
-    "StuckException",
     "_EvalProxy",
     "_get_current_context",
     "_ensure_context",
