@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import collections.abc
+import copy
 import dataclasses
 import dis
 import math
@@ -239,23 +240,22 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         else:
             stack.append(_set_pos(ast.Constant(value="<function>"), instr))
 
-    elif op == "LIST_EXTEND":
-        source = stack.pop()
-        target = stack[-argval]
+    elif op in ("LIST_EXTEND", "LIST_APPEND"):
+        item = stack.pop()
+        if op == "LIST_EXTEND":
+            item = ast.Starred(value=item, ctx=ast.Load())
+        # Copy rather than mutate the list, since it may be shared with
+        # another branch's stack.
+        target = copy.copy(stack[-argval])
         assert isinstance(target, ast.List)
-        target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
+        target.elts = [*target.elts, item]
+        stack[-argval] = target
 
     elif op == "CALL":
         args = stack[len(stack) - argval :]
         del stack[len(stack) - argval :]
         func = stack.pop()
         stack.append(ast.Call(func=func, args=args, keywords=[]))
-
-    elif op == "LIST_APPEND":
-        item = stack.pop()
-        target = stack[-argval]
-        assert isinstance(target, ast.List)
-        target.elts.append(item)
 
     elif op == "CALL_INTRINSIC_1":
         if arg == _INTRINSIC_LIST_TO_TUPLE:
@@ -890,6 +890,14 @@ def _merge_values(
     """
     if ast.dump(true_val) == ast.dump(false_val):
         return true_val
+
+    # An if-expression can't produce a starred item, so the star must be
+    # outside it.
+    if isinstance(true_val, ast.Starred) and isinstance(false_val, ast.Starred):
+        return ast.Starred(
+            value=_merge_values(true_val.value, false_val.value, test),
+            ctx=ast.Load(),
+        )
 
     if not _same_span(true_val, false_val):
         return ast.IfExp(test=test, body=true_val, orelse=false_val)
