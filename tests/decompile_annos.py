@@ -232,11 +232,6 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
         # nested `for` in comprehensions
         "test_type_dir::NoLiterals1",
         "test_type_dir::NoLiterals2",
-        # negative constants are folded, unlike in the source AST
-        "test_nplike::DropLast",
-        "test_nplike::Last",
-        "test_ziplike::DropLast",
-        "test_ziplike::Last",
     }
 )
 
