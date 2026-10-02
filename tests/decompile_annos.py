@@ -14,6 +14,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+from typing import Any
 
 import annotationlib  # noqa: F401
 import pytest
@@ -99,13 +100,17 @@ def _collect_cases_for(path: pathlib.Path) -> list[Case]:
     orig_mod = _import_path(path)
     orig_map = dict(collect_annotated(orig_mod))
 
+    # Look objects up by name rather than with collect_annotated, since
+    # stringified classes have a plain __annotations__ dict and no
+    # __annotate__.
     string_mod = load_stringified_copy(path)
-    string_map = dict(collect_annotated(string_mod))
 
     stem = path.stem
     cases: list[Case] = []
     for qname, orig_obj in orig_map.items():
-        string_obj = string_map.get(qname)
+        string_obj: Any = string_mod
+        for part in qname.split("."):
+            string_obj = getattr(string_obj, part, None)
         if string_obj is None:
             continue
         string_annos = get_annotations_str(string_obj)
