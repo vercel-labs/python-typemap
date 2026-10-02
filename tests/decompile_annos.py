@@ -14,6 +14,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+import typing
 from typing import Any
 
 import annotationlib  # noqa: F401
@@ -25,7 +26,11 @@ from tests.dump_annos import (
     load_stringified_copy,
     parse_annotation,
 )
-from typemap.type_eval._decompile import DecompileError, decompile_annotations
+from typemap.type_eval._decompile import (
+    DecompileError,
+    decompile_annotate,
+    decompile_annotations,
+)
 
 TESTS_DIR = pathlib.Path(__file__).parent
 
@@ -134,13 +139,104 @@ def _collect_all_cases(
     return all_cases
 
 
+# (label, alias, expected value AST from the source)
+AliasCase = tuple[str, typing.TypeAliasType, ast.expr]
+
+
+def _iter_type_alias_nodes(
+    body: list[ast.stmt], prefix: str = ""
+) -> typing.Iterator[tuple[str, ast.TypeAlias]]:
+    for node in body:
+        if isinstance(node, ast.TypeAlias):
+            yield f"{prefix}{node.name.id}", node
+        elif isinstance(node, ast.ClassDef):
+            yield from _iter_type_alias_nodes(
+                node.body, prefix=f"{prefix}{node.name}."
+            )
+
+
+def _collect_alias_cases_for(path: pathlib.Path) -> list[AliasCase]:
+    """Build cases for every module- or class-level type alias in a file.
+
+    Expected values come straight from the source AST.
+    """
+    mod = _import_path(path)
+    tree = ast.parse(path.read_text())
+    cases: list[AliasCase] = []
+    for qname, node in _iter_type_alias_nodes(tree.body):
+        alias: Any = mod
+        for part in qname.split("."):
+            alias = getattr(alias, part, None)
+        if isinstance(alias, typing.TypeAliasType):
+            cases.append((f"{path.stem}::{qname}", alias, node.value))
+    return cases
+
+
+def _collect_all_alias_cases(
+    paths: list[pathlib.Path] | None = None,
+) -> list[AliasCase]:
+    if paths is None:
+        paths = _discover_test_files()
+    all_cases: list[AliasCase] = []
+    for path in paths:
+        try:
+            all_cases.extend(_collect_alias_cases_for(path))
+        except Exception as exc:
+            print(f"Warning: skipping {path.name}: {exc}", file=sys.stderr)
+    return all_cases
+
+
+def _decompile_alias(alias: typing.TypeAliasType) -> ast.expr:
+    value, _ = decompile_annotate(alias.evaluate_value)
+    assert isinstance(value, ast.expr)
+    return value
+
+
 _CASES = _collect_all_cases()
+_ALIAS_CASES = _collect_all_alias_cases()
 
 # Known failures — listed explicitly so new breakages aren't silently hidden.
 _KNOWN_XFAILS: frozenset[str] = frozenset(
     {
         # lambda in Annotated — not decompilable
         "_annos::fn57.return",
+        # `and` in if-expression conditions
+        "test_astlike_1::IsNumericAssignable",
+        "test_astlike_1::IsFloat",
+        "test_astlike_1::IsComplex",
+        "test_astlike_1::SimpleNumericOp",
+        "test_astlike_1::ComplexNumericOp",
+        "test_astlike_1::TrueDiv",
+        "test_nplike::MergeOne",
+        "test_qblike_3::ReplaceNever",
+        "test_type_dir::IsLiteral",
+        "test_ziplike::Zip",
+        "test_ziplike::ZipN",
+        # `not`
+        "test_qblike_3::ColumnInitHasDefault",
+        "test_qblike_3::ReadValueNeverNull",
+        # `is`
+        "test_astlike_1::VarIsPresent",
+        "test_astlike_1::AllVarsPresent",
+        "test_qblike_3::EntriesHasTable",
+        "test_type_dir::StrForInt",
+        # `if` clauses in comprehensions
+        "test_eval_call_with_types::GetCallableMember",
+        "test_qblike_3::AddTable",
+        "test_qblike_3::AddField",
+        "test_qblike_3::Select",
+        # comprehension loop variable captured by a nested scope
+        "test_astlike_1::CombineVarArgs",
+        "test_qblike_3::EntryFieldMembers",
+        "test_qblike_3::MakeQueryEntryNamedFields",
+        # nested `for` in comprehensions
+        "test_type_dir::NoLiterals1",
+        "test_type_dir::NoLiterals2",
+        # negative constants are folded, unlike in the source AST
+        "test_nplike::DropLast",
+        "test_nplike::Last",
+        "test_ziplike::DropLast",
+        "test_ziplike::Last",
     }
 )
 
@@ -179,6 +275,21 @@ def test_decompile_annotation(case: Case) -> None:
     got_dump = ast.dump(decompiled[key])
     assert got_dump == expected_dump, (
         f"{label}.{key}:\n  expected: {expected_dump}\n  got:      {got_dump}"
+    )
+
+
+@pytest.mark.parametrize(
+    "case", _ALIAS_CASES, ids=[label for label, _, _ in _ALIAS_CASES]
+)
+def test_decompile_type_alias(case: AliasCase) -> None:
+    label, alias, expected = case
+    if label in _KNOWN_XFAILS:
+        pytest.xfail(f"known failure: {label}")
+
+    expected_dump = ast.dump(expected)
+    got_dump = ast.dump(_decompile_alias(alias))
+    assert got_dump == expected_dump, (
+        f"{label}:\n  expected: {expected_dump}\n  got:      {got_dump}"
     )
 
 
@@ -229,6 +340,22 @@ def main(paths: list[pathlib.Path] | None = None) -> None:
                 f"{label}.{key}:\n"
                 f"  expected: {expected_dump}\n"
                 f"  got:      {got_dump}"
+            )
+            failed += 1
+
+    for label, alias, expected in _collect_all_alias_cases(paths):
+        expected_dump = ast.dump(expected)
+        try:
+            got_dump = ast.dump(_decompile_alias(alias))
+        except DecompileError as exc:
+            errors.append(f"{label}: DecompileError: {exc}")
+            failed += 1
+            continue
+        if got_dump == expected_dump:
+            passed += 1
+        else:
+            errors.append(
+                f"{label}:\n  expected: {expected_dump}\n  got:      {got_dump}"
             )
             failed += 1
 
