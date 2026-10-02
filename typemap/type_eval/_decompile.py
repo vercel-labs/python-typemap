@@ -107,6 +107,29 @@ def _same_span(a: ast.expr, b: ast.expr) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _get_instructions(
+    code: types.CodeType,
+) -> tuple[list[dis.Instruction], dict[int, int]]:
+    """Return the instructions of `code` and a map from offsets to indices
+    (for resolving jumps).
+
+    EXTENDED_ARGs are dropped (dis folds them into the following
+    instruction's arg); jumps to one resolve to that instruction.
+    """
+    instructions: list[dis.Instruction] = []
+    offset_to_idx: dict[int, int] = {}
+    pending: list[int] = []
+    for instr in dis.get_instructions(code):
+        pending.append(instr.offset)
+        if instr.opname == "EXTENDED_ARG":
+            continue
+        for offset in pending:
+            offset_to_idx[offset] = len(instructions)
+        pending.clear()
+        instructions.append(instr)
+    return instructions, offset_to_idx
+
+
 def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
     """Execute a stack-only opcode (no pc modification needed).
 
@@ -406,8 +429,7 @@ def _decompile_listcomp_code(
     Used for class body and method annotations where the comprehension
     is compiled as its own code object, called via MAKE_FUNCTION + CALL.
     """
-    instrs = list(dis.get_instructions(code))
-    off_to_idx = {i.offset: idx for idx, i in enumerate(instrs)}
+    instrs, off_to_idx = _get_instructions(code)
 
     # Skip preamble: COPY_FREE_VARS, RESUME, BUILD_LIST 0, LOAD_FAST .0
     pc = 0
@@ -487,12 +509,7 @@ def _decompile_bytecode(
     `conditional` is the value of ``__conditional_annotations__``: the
     indices of the conditionally defined annotations that were executed.
     """
-    instructions = list(dis.get_instructions(code))
-
-    # Build offset → index map for jump resolution
-    offset_to_idx: dict[int, int] = {}
-    for idx, instr in enumerate(instructions):
-        offset_to_idx[instr.offset] = idx
+    instructions, offset_to_idx = _get_instructions(code)
 
     # Skip preamble up through RAISE_VARARGS
     start = 0
