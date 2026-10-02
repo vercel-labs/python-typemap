@@ -29,6 +29,8 @@ structure (different span → wrap with outer IfExp).
 from __future__ import annotations
 
 import ast
+import collections.abc
+import dataclasses
 import dis
 import types
 from typing import Any, Union
@@ -44,6 +46,8 @@ _INTRINSIC_LIST_TO_TUPLE = 6
 # Stack sentinels (compared by identity)
 _CLASSDICT: ast.expr = ast.Name(id="__classdict__")
 _MAP: ast.expr = ast.Name(id="__map__")
+# Result key for the bare value returned by an evaluate_* function
+_VALUE_KEY = "<value>"
 
 
 class DecompileError(Exception):
@@ -621,6 +625,8 @@ def _run(
                 return  # both branches returned; we're done
 
         elif op == "RETURN_VALUE":
+            if stack and stack[-1] is not _MAP:
+                result[_VALUE_KEY] = stack.pop()
             return
 
         elif op in (
@@ -844,9 +850,189 @@ def _merge_branch_results(
             result[key] = false_val
 
 
+#####
+
+
+class _CellMapping(collections.abc.Mapping[str, Any]):
+    """A mapping that holds cells and dereferences them on access."""
+
+    __slots__ = ("closure",)
+
+    def __init__(self, closure: dict[str, types.CellType]) -> None:
+        self.closure = closure
+
+    def __getitem__(self, key: str) -> Any:
+        cell = self.closure[key]
+        try:
+            return cell.cell_contents
+        except ValueError:
+            raise NameError(
+                f"cannot access free variable {key!r} where it is not "
+                "associated with a value in enclosing scope",
+                name=key,
+            )
+
+    def __iter__(self) -> collections.abc.Iterator[str]:
+        return iter(self.closure)
+
+    def __len__(self) -> int:
+        return len(self.closure)
+
+
+@dataclasses.dataclass
+class BindingEnvironment:
+    globals: dict[str, Any]
+    closure: collections.abc.Mapping[str, Any]
+    """Free variables, excluding __classdict__ and
+    __conditional_annotations__."""
+    classdict: collections.abc.Mapping[str, Any] | None
+    """The class namespace, for annotations in class scope."""
+
+
+@dataclasses.dataclass
+class AnnotateInfo:
+    metadata: BindingMetadata
+    env: BindingEnvironment
+
+
+_NAME_OPS = frozenset(dis.hasname + dis.haslocal + dis.hasfree)
+
+
+def _collect_names(
+    code: types.CodeType,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Find (global names, all names) used, including in nested code objects.
+
+    In a class-scoped annotate function, ordinary names are loaded with
+    LOAD_FROM_DICT_OR_GLOBALS, so LOAD_GLOBAL indicates a ``global``
+    declaration.
+    """
+    global_names: dict[str, None] = {}
+    all_names: dict[str, None] = {}
+
+    def visit(code: types.CodeType) -> None:
+        for instr in dis.get_instructions(code):
+            if instr.opcode not in _NAME_OPS:
+                continue
+            if instr.opname == "LOAD_GLOBAL":
+                global_names[instr.argval] = None
+            vals = instr.argval
+            for name in vals if isinstance(vals, tuple) else (vals,):
+                all_names[name] = None
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                visit(const)
+
+    visit(code)
+    return tuple(global_names), tuple(all_names)
+
+
+def _is_private_name(name: str) -> bool:
+    return name.startswith("__") and not name.endswith("__") and "." not in name
+
+
+def _find_mangled_names(
+    names: tuple[str, ...], class_name: str | None
+) -> tuple[str, ...] | None:
+    if class_name is None or not class_name.lstrip("_"):
+        return None
+    if not any(_is_private_name(name) for name in names):
+        return None
+    prefix = "_" + class_name.lstrip("_")
+    return tuple(
+        name.removeprefix(prefix)
+        for name in names
+        if name.startswith(prefix)
+        and _is_private_name(name.removeprefix(prefix))
+    )
+
+
+def _enclosing_class_name(fn: types.FunctionType) -> str | None:
+    # An annotate/evaluate function's qualname is that of its enclosing
+    # scope plus one final component.  In the rest, a component followed
+    # by "<locals>" is a function; any other component is a class.
+    parts = fn.__qualname__.split(".")[:-1]
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] != "<locals>" and (
+            i + 1 == len(parts) or parts[i + 1] != "<locals>"
+        ):
+            return parts[i]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class BindingMetadata:
+    class_name: str | None
+    """The enclosing class name, for name mangling purposes."""
+    global_names: tuple[str, ...]
+    """Names known to be declared global."""
+    mangled_names: tuple[str, ...] | None
+    """If not None, only these private names are mangled.
+
+    Mirrors ``ste_mangled_names`` in CPython's symtable, which is set for
+    scopes (like generic class type params) where only some ``__`` names
+    get mangled.  Names are stored unmangled.
+    """
+
+
+def _get_environment(fn: types.FunctionType) -> BindingEnvironment:
+    cells = dict(
+        zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=True)
+    )
+    classdict = None
+    if "__classdict__" in cells:
+        try:
+            classdict = cells["__classdict__"].cell_contents
+        except ValueError:
+            pass
+    closure = _CellMapping(
+        {
+            name: cell
+            for name, cell in cells.items()
+            if name not in ("__classdict__", "__conditional_annotations__")
+        }
+    )
+    return BindingEnvironment(
+        globals=fn.__globals__, closure=closure, classdict=classdict
+    )
+
+
+def decompile_annotate(
+    fn: types.FunctionType,
+    class_name: str | None = None,
+) -> tuple[dict[str, ast.expr] | ast.expr, AnnotateInfo]:
+    """Decompile an __annotate__ or evaluate_* function into AST nodes.
+
+    For an __annotate__ function, returns a dict mapping annotation names
+    to ast.expr nodes.  For an evaluate_* function (type alias values,
+    TypeVar bounds, etc.), returns the single ast.expr it evaluates.
+    Also returns the metadata and environment needed to resolve names
+    in them.
+
+    The class used for name mangling is derived from ``fn``'s qualname,
+    which is wrong for the type params of a generic class: those are
+    mangled with the generic class itself, but their qualnames only name
+    the enclosing scope.  Callers can pass ``class_name`` to override it.
+    """
+    code = fn.__code__
+    if class_name is None:
+        class_name = _enclosing_class_name(fn)
+    global_names, all_names = _collect_names(code)
+    metadata = BindingMetadata(
+        class_name=class_name,
+        global_names=global_names,
+        mangled_names=_find_mangled_names(all_names, class_name),
+    )
+    info = AnnotateInfo(metadata=metadata, env=_get_environment(fn))
+    result = _decompile_bytecode(code)
+    if _VALUE_KEY in result:
+        return result[_VALUE_KEY], info
+    return result, info
 
 
 def decompile_annotations(
@@ -861,5 +1047,6 @@ def decompile_annotations(
     annotate = getattr(obj, "__annotate__", None)
     if annotate is None:
         return {}
-    code = annotate.__code__
-    return _decompile_bytecode(code)
+    result, _ = decompile_annotate(annotate)
+    assert isinstance(result, dict)
+    return result
