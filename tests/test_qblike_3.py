@@ -280,9 +280,9 @@ type AddTable[Entries, New: Table] = tuple[
         for e in Iter[Entries]
     ],
     *(  # Add entries if not present
-        []
+        tuple[()]
         if Bool[EntriesHasTable[Entries, New]]
-        else [MakeQueryEntryAllFields[New]]
+        else tuple[MakeQueryEntryAllFields[New]]
     ),
 ]
 type AddField[Entries, New: _Field] = tuple[
@@ -297,11 +297,11 @@ type AddField[Entries, New: _Field] = tuple[
         )
         for e in Iter[Entries]
     ],
-    *(  # Add entries if not present
+    *[  # Add entries if not present
         e
         for e in Iter[tuple[QueryEntry[FieldTable[New], tuple[FieldName[New]]]]]
         if not Bool[EntriesHasTable[Entries, FieldTable[New]]]
-    ),
+    ],
 ]
 type AddEntries[Entries, News: tuple[Table | _Field, ...]] = (
     Entries
