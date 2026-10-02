@@ -35,7 +35,7 @@ import dataclasses
 import dis
 import math
 import types
-from typing import Any, Union
+from typing import Any, Callable, Union
 
 
 # BINARY_OP arg constants (from dis._nb_ops)
@@ -49,8 +49,21 @@ _INTRINSIC_LIST_TO_TUPLE = 6
 _CLASSDICT: ast.expr = ast.Name(id="__classdict__")
 _MAP: ast.expr = ast.Name(id="__map__")
 _CONDITIONAL: ast.expr = ast.Name(id="__conditional_annotations__")
-# Result key for the bare value returned by an evaluate_* function
+_CMP_OPS: dict[str, type[ast.cmpop]] = {
+    "<": ast.Lt,
+    "<=": ast.LtE,
+    "==": ast.Eq,
+    "!=": ast.NotEq,
+    ">": ast.Gt,
+    ">=": ast.GtE,
+}
+
+# Result keys for the bare value returned by an evaluate_* function, and
+# for the element of a comprehension
 _VALUE_KEY = "<value>"
+_ELT_KEY = "<elt>"
+# A comprehension element that is skipped (by a filter)
+_SKIP: ast.expr = ast.Name(id="<skip>")
 
 
 class DecompileError(Exception):
@@ -137,6 +150,27 @@ def _get_instructions(
         pending.clear()
         instructions.append(instr)
     return instructions, offset_to_idx
+
+
+def _not(expr: ast.expr) -> ast.expr:
+    return ast.UnaryOp(op=ast.Not(), operand=expr)
+
+
+def _is_bool_expr(expr: ast.expr) -> bool:
+    return isinstance(expr, ast.Compare) or (
+        isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not)
+    )
+
+
+def _strip_not_not(expr: ast.expr) -> ast.expr:
+    if (
+        isinstance(expr, ast.UnaryOp)
+        and isinstance(expr.op, ast.Not)
+        and isinstance(expr.operand, ast.UnaryOp)
+        and isinstance(expr.operand.op, ast.Not)
+    ):
+        return expr.operand.operand
+    return expr
 
 
 def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
@@ -277,6 +311,31 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         top = stack.pop()
         stack.append(ast.Starred(value=top, ctx=ast.Load()))
 
+    elif op == "TO_BOOL":
+        # Usually this feeds a jump or UNARY_NOT, but on its own it is
+        # what `not not x` compiles to.  Jumps strip it (see _make_atom).
+        operand = stack.pop()
+        if not _is_bool_expr(operand):
+            operand = _not(_not(operand))
+        stack.append(operand)
+
+    elif op == "UNARY_NOT":
+        operand = stack.pop()
+        stack.append(_not(_strip_not_not(operand)))
+
+    elif op in ("IS_OP", "CONTAINS_OP", "COMPARE_OP"):
+        right = stack.pop()
+        left = stack.pop()
+        cmp: ast.cmpop
+        if op == "IS_OP":
+            cmp = ast.IsNot() if arg else ast.Is()
+        elif op == "CONTAINS_OP":
+            cmp = ast.NotIn() if arg else ast.In()
+        else:
+            assert arg is not None
+            cmp = _CMP_OPS[dis.cmp_op[arg >> 5]]()
+        stack.append(ast.Compare(left=left, ops=[cmp], comparators=[right]))
+
     elif op in ("NOT_TAKEN", "PUSH_NULL"):
         pass
 
@@ -286,54 +345,97 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
     return True
 
 
-def _exec_op(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
-    pc: int,
-    stack: list[ast.expr],
-) -> int | None:
+@dataclasses.dataclass
+class _Code:
+    """Instructions of a code object, with control flow information."""
+
+    instructions: list[dis.Instruction]
+    offset_to_idx: dict[int, int]
+    ipdom: list[int | None] = dataclasses.field(init=False)
+    """The immediate post-dominator of each instruction: the first one that
+    every path from it reaches (or None if paths exit separately)."""
+    memo: dict[Any, Any] = dataclasses.field(default_factory=dict)
+    """Results of running branches; see _fork."""
+
+    def __post_init__(self) -> None:
+        # All jumps are forward except JUMP_BACKWARD, which only closes
+        # comprehension loops.  Treat it as an exit, and a loop as going
+        # straight from its FOR_ITER to the end, so that we can work
+        # backwards.
+        self.ipdom = [None] * len(self.instructions)
+        for i in reversed(range(len(self.instructions))):
+            instr = self.instructions[i]
+            op = instr.opname
+            if op in _EXITS:
+                continue
+            if op in ("FOR_ITER", "JUMP_FORWARD"):
+                self.ipdom[i] = self.target(instr)
+            elif op in _COND_JUMPS:
+                self.ipdom[i] = self.join(self.target(instr), i + 1)
+            elif i + 1 < len(self.instructions):
+                self.ipdom[i] = i + 1
+
+    def target(self, instr: dis.Instruction) -> int:
+        return self.offset_to_idx[instr.argval]
+
+    def join(self, a: int | None, b: int | None) -> int | None:
+        """Return the first instruction every path from both `a` and `b`
+        reaches, or None if there isn't one."""
+        while a is not None and b is not None and a != b:
+            if a < b:
+                a = self.ipdom[a]
+            else:
+                b = self.ipdom[b]
+        return a if a == b else None
+
+
+_EXITS = frozenset(
+    {"RETURN_VALUE", "RAISE_VARARGS", "RERAISE", "JUMP_BACKWARD"}
+)
+
+_COND_JUMPS = frozenset(
+    {
+        "POP_JUMP_IF_FALSE",
+        "POP_JUMP_IF_TRUE",
+        "POP_JUMP_IF_NONE",
+        "POP_JUMP_IF_NOT_NONE",
+    }
+)
+
+
+def _exec_op(bc: _Code, pc: int, stack: list[ast.expr]) -> int | None:
     """Execute the instruction at `pc` if it is an ordinary expression op.
 
     Returns the index of the next instruction, or None if not handled.
     """
-    instr = instructions[pc]
-    if (
-        target := _builtin_guard_at(instructions, offset_to_idx, pc)
-    ) is not None:
+    instr = bc.instructions[pc]
+    if (target := _builtin_guard_at(bc, pc)) is not None:
         # Follow the plain call path rather than the inlined builtin.
         return target
     if instr.opname == "GET_ITER":
-        return _handle_get_iter(instructions, offset_to_idx, pc + 1, stack)
+        return _handle_get_iter(bc, pc + 1, stack)
     if _exec_stack_op(instr, stack):
         return pc + 1
     return None
 
 
-def _builtin_guard_at(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
-    pc: int,
-) -> int | None:
+def _builtin_guard_at(bc: _Code, pc: int) -> int | None:
     """Match ``COPY 1; LOAD_COMMON_CONSTANT; IS_OP 0; POP_JUMP_IF_FALSE``.
 
     The compiler inlines calls like ``any(<genexpr>)``, guarded by a
     check that the name still refers to the builtin; otherwise it jumps
     to code for the plain call.  Returns the index of that code.
     """
-    ops = [i.opname for i in instructions[pc : pc + 4]]
+    instrs = bc.instructions[pc : pc + 4]
+    ops = [i.opname for i in instrs]
     if ops != ["COPY", "LOAD_COMMON_CONSTANT", "IS_OP", "POP_JUMP_IF_FALSE"]:
         return None
-    if instructions[pc].arg != 1 or instructions[pc + 2].arg != 0:
+    if instrs[0].arg != 1 or instrs[2].arg != 0:
         return None
-    return offset_to_idx[instructions[pc + 3].argval]
+    return bc.target(instrs[3])
 
 
-def _handle_get_iter(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
-    pc: int,
-    stack: list[ast.expr],
-) -> int:
+def _handle_get_iter(bc: _Code, pc: int, stack: list[ast.expr]) -> int:
     """Handle GET_ITER: pop iterable, dispatch to Pattern A or B.
 
     Returns the new pc (advanced past the comprehension instructions).
@@ -349,14 +451,14 @@ def _handle_get_iter(
         comp = _decompile_comp_code(code_marker.value, iterable_node)
         stack.append(comp)
         # Skip the CALL instruction
-        while pc < len(instructions) and instructions[pc].opname != "CALL":
+        while (
+            pc < len(bc.instructions) and bc.instructions[pc].opname != "CALL"
+        ):
             pc += 1
         pc += 1  # skip CALL itself
     else:
         # Pattern B: inlined comprehension
-        comp, pc = _decompile_inline_comp(
-            instructions, offset_to_idx, pc, iterable_node
-        )
+        comp, pc = _decompile_inline_comp(bc, pc, iterable_node)
         stack.append(comp)
     return pc
 
@@ -367,75 +469,71 @@ def _handle_get_iter(
 
 
 def _decompile_comp_body(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
+    bc: _Code,
     pc: int,
     var_name: str,
     has_initial_load: bool,
-) -> tuple[ast.expr, list[ast.expr], int]:
-    """Walk comprehension body instructions, returning the body AST.
+) -> tuple[ast.expr, list[ast.expr]]:
+    """Decompile a comprehension body, starting after the loop variable is
+    stored.  Returns (element, filters).
 
-    Processes instructions from after STORE_FAST/STORE_FAST_LOAD_FAST
-    up through LIST_APPEND.  Detects filter clauses (``if`` in the
-    comprehension) by the pattern TO_BOOL → POP_JUMP_IF_TRUE →
-    NOT_TAKEN → JUMP_BACKWARD.
-
-    Returns (body_expr, filter_ifs, pc_after_LIST_APPEND).
+    The body is run like any other code (see _run), except that it ends
+    either by appending an element or by skipping to the next iteration.
     """
     stack: list[ast.expr] = []
     if has_initial_load:
         stack.append(ast.Name(id=var_name, ctx=ast.Load()))
+    result: dict[str, ast.expr] = {}
+    _run(bc, pc, stack, result, None, in_comp=True)
+
+    elt = _simplify(result[_ELT_KEY])
     filters: list[ast.expr] = []
+    while isinstance(elt, ast.IfExp):
+        if elt.orelse is _SKIP:
+            filters.append(elt.test)
+            elt = elt.body
+        elif elt.body is _SKIP:
+            filters.append(_negate(elt.test))
+            elt = elt.orelse
+        else:
+            break
+    if any(node is _SKIP for node in ast.walk(elt)):
+        # The skips are mixed in with if-expressions.  If those all pick
+        # the same element, they're really just a complicated filter.
+        leaves = _ifexp_leaves(elt)
+        kept = [leaf for leaf in leaves if leaf is not _SKIP]
+        if any(ast.dump(leaf) != ast.dump(kept[0]) for leaf in kept):
+            raise DecompileError("Unsupported filter in comprehension")
+        cond = _filter_condition(elt)
+        assert isinstance(cond, ast.expr)
+        filters.append(cond)
+        elt = kept[0]
+    return elt, filters
 
-    while pc < len(instructions):
-        instr = instructions[pc]
-        op = instr.opname
 
-        if op in ("LIST_APPEND", "YIELD_VALUE"):
-            body = stack.pop()
-            return body, filters, pc + 1
+def _ifexp_leaves(expr: ast.expr) -> list[ast.expr]:
+    if isinstance(expr, ast.IfExp):
+        return _ifexp_leaves(expr.body) + _ifexp_leaves(expr.orelse)
+    return [expr]
 
-        # Filter detection: TO_BOOL followed by
-        # POP_JUMP_IF_TRUE → NOT_TAKEN → JUMP_BACKWARD
-        if op == "TO_BOOL":
-            filter_expr = stack.pop()
-            npc = pc + 1
-            while (
-                npc < len(instructions)
-                and instructions[npc].opname == "NOT_TAKEN"
-            ):
-                npc += 1
-            pjmp = instructions[npc]
-            if pjmp.opname in (
-                "POP_JUMP_IF_TRUE",
-                "POP_JUMP_IF_FALSE",
-            ):
-                # Check if fallthrough goes to JUMP_BACKWARD (skip)
-                after = npc + 1
-                while (
-                    after < len(instructions)
-                    and instructions[after].opname == "NOT_TAKEN"
-                ):
-                    after += 1
-                if instructions[after].opname == "JUMP_BACKWARD":
-                    # This is a filter clause
-                    if pjmp.opname == "POP_JUMP_IF_FALSE":
-                        filter_expr = ast.UnaryOp(
-                            op=ast.Not(), operand=filter_expr
-                        )
-                    filters.append(filter_expr)
-                    pc = after + 1  # skip past JUMP_BACKWARD
-                    continue
-            raise DecompileError(
-                "Unexpected TO_BOOL pattern in comprehension body"
-            )
 
-        new_pc = _exec_op(instructions, offset_to_idx, pc, stack)
-        if new_pc is None:
-            raise DecompileError(f"Unsupported opcode in listcomp body: {op}")
-        pc = new_pc
-
-    raise DecompileError("End of comprehension body not found")
+def _filter_condition(expr: ast.expr) -> ast.expr | bool:
+    """Turn an if-expression tree whose leaves are an element or _SKIP into
+    the condition for keeping the element."""
+    if not isinstance(expr, ast.IfExp):
+        return expr is not _SKIP
+    test = expr.test
+    body = _filter_condition(expr.body)
+    orelse = _filter_condition(expr.orelse)
+    if isinstance(body, bool):
+        if isinstance(orelse, bool):
+            if body == orelse:
+                return body
+            return test if body else _negate(test)
+        return _or(test, orelse) if body else _and(_negate(test), orelse)
+    if isinstance(orelse, bool):
+        return _or(_negate(test), body) if orelse else _and(test, body)
+    return ast.IfExp(test=test, body=body, orelse=orelse)
 
 
 def _get_comp_loop_var(
@@ -488,7 +586,8 @@ def _decompile_comp_code(
     body and method annotations, where the comprehension is compiled as
     its own code object, called via MAKE_FUNCTION + CALL.
     """
-    instrs, off_to_idx = _get_instructions(code)
+    bc = _Code(*_get_instructions(code))
+    instrs = bc.instructions
 
     # Skip preamble: COPY_FREE_VARS, RESUME, BUILD_LIST 0 (or
     # RETURN_GENERATOR, POP_TOP), LOAD_FAST .0
@@ -515,17 +614,14 @@ def _decompile_comp_code(
     pc += 1
 
     var_name, has_load, pc = _get_comp_loop_var(instrs, pc)
-    body, filters, _ = _decompile_comp_body(
-        instrs, off_to_idx, pc, var_name, has_load
-    )
+    body, filters = _decompile_comp_body(bc, pc, var_name, has_load)
     return _build_listcomp(
         body, filters, var_name, iterable, code.co_name == "<genexpr>"
     )
 
 
 def _decompile_inline_comp(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
+    bc: _Code,
     pc: int,
     iterable: ast.expr,
 ) -> tuple[ast.ListComp | ast.GeneratorExp, int]:
@@ -536,27 +632,21 @@ def _decompile_inline_comp(
 
     Returns (ListComp, pc_after_cleanup).
     """
+    instructions = bc.instructions
     # Skip preamble until FOR_ITER
     while pc < len(instructions) and instructions[pc].opname != "FOR_ITER":
         pc += 1
 
-    assert instructions[pc].opname == "FOR_ITER"
+    for_iter = instructions[pc]
+    assert for_iter.opname == "FOR_ITER"
     pc += 1
 
     var_name, has_load, pc = _get_comp_loop_var(instructions, pc)
-    body, filters, pc = _decompile_comp_body(
-        instructions, offset_to_idx, pc, var_name, has_load
-    )
+    body, filters = _decompile_comp_body(bc, pc, var_name, has_load)
 
-    # Skip cleanup: JUMP_BACKWARD, END_FOR, POP_ITER, SWAP, STORE_FAST
-    _cleanup = {
-        "JUMP_BACKWARD",
-        "END_FOR",
-        "POP_ITER",
-        "SWAP",
-        "STORE_FAST",
-        "NOT_TAKEN",
-    }
+    # Skip cleanup: END_FOR, POP_ITER, SWAP, STORE_FAST
+    pc = bc.target(for_iter)
+    _cleanup = {"END_FOR", "POP_ITER", "SWAP", "STORE_FAST"}
     while pc < len(instructions) and instructions[pc].opname in _cleanup:
         pc += 1
 
@@ -577,287 +667,332 @@ def _decompile_bytecode(
     `conditional` is the value of ``__conditional_annotations__``: the
     indices of the conditionally defined annotations that were executed.
     """
-    instructions, offset_to_idx = _get_instructions(code)
+    bc = _Code(*_get_instructions(code))
 
     # Skip preamble up through RAISE_VARARGS
     start = 0
-    for i, instr in enumerate(instructions):
+    for i, instr in enumerate(bc.instructions):
         if instr.opname == "RAISE_VARARGS":
             start = i + 1
             break
 
     result: dict[str, ast.expr] = {}
-    _run(instructions, offset_to_idx, start, [], result, conditional)
-    return result
+    _run(bc, start, [], result, conditional)
+    return {key: _simplify(value) for key, value in result.items()}
 
 
 def _run(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
+    bc: _Code,
     pc: int,
     stack: list[ast.expr],
     result: dict[str, ast.expr],
     conditional: collections.abc.Container[int] | None,
+    stop: int | None = None,
+    in_comp: bool = False,
 ) -> None:
     """Execute bytecode from `pc`, mutating `stack` and `result`.
 
-    For inline if-expressions (JUMP_FORWARD after true branch), this
-    constructs an ast.IfExp and continues linearly.
-
-    For tail-position if-expressions (each branch has its own BUILD_MAP +
-    RETURN_VALUE), this recursively processes both branches, merging their
-    results with IfExp wrappers for any keys whose values differ.
+    Runs until reaching `stop`, or until the code finishes: by returning,
+    or in a comprehension body (if `in_comp`), by appending an element or
+    skipping to the next iteration.  Results go in `result`: annotations
+    under their names, a returned value under _VALUE_KEY, and a
+    comprehension element (or _SKIP) under _ELT_KEY.
     """
-    while pc < len(instructions):
-        instr = instructions[pc]
+    while pc != stop:
+        instr = bc.instructions[pc]
         op = instr.opname
-        arg = instr.arg
         argval = instr.argval
-        pc += 1
 
-        if (
-            new_pc := _exec_op(instructions, offset_to_idx, pc - 1, stack)
-        ) is not None:
-            pc = new_pc
-
-        elif op == "BUILD_MAP":
-            n = argval
-            if n == 0:
-                stack.append(_MAP)
-            else:
-                items = stack[-n * 2 :]
-                del stack[-n * 2 :]
-                for i in range(0, len(items), 2):
-                    key_node = items[i]
-                    val_node = items[i + 1]
-                    assert isinstance(key_node, ast.Constant)
-                    assert isinstance(key_node.value, str)
-                    result[key_node.value] = val_node
-
-        elif op == "COPY":
-            stack.append(stack[-argval])
-
-        elif op == "STORE_SUBSCR":
-            key_node = stack.pop()
-            stack.pop()  # __map__ copy
-            val_node = stack.pop()
-            assert isinstance(key_node, ast.Constant)
-            assert isinstance(key_node.value, str)
-            result[key_node.value] = val_node
-
-        elif op == "TO_BOOL":
-            # The test expression is on top of stack.  The next meaningful
-            # instruction is POP_JUMP_IF_FALSE (skip NOT_TAKEN).
-            test_node = stack.pop()
-
-            # Advance past NOT_TAKEN to POP_JUMP_IF_FALSE
-            while pc < len(instructions) and instructions[pc].opname in (
-                "NOT_TAKEN",
-            ):
-                pc += 1
-            assert (
-                pc < len(instructions)
-                and instructions[pc].opname == "POP_JUMP_IF_FALSE"
-            ), (
-                "Expected POP_JUMP_IF_FALSE after TO_BOOL, "
-                f"got {instructions[pc].opname}"
-            )
-            jump_instr = instructions[pc]
-            else_idx = offset_to_idx[jump_instr.argval]
-            pc += 1  # skip POP_JUMP_IF_FALSE
-
-            # Skip NOT_TAKEN after POP_JUMP_IF_FALSE
-            while (
-                pc < len(instructions)
-                and instructions[pc].opname == "NOT_TAKEN"
-            ):
-                pc += 1
-
-            # Check whether this is inline (true branch ends with
-            # JUMP_FORWARD) or tail-position (true branch ends with
-            # RETURN_VALUE).
-            if _is_inline_ifexp(instructions, pc, else_idx):
-                value, pc = _run_inline_ifexp(
-                    instructions, offset_to_idx, test_node, pc, else_idx, stack
-                )
-                stack.append(value)
-            else:
-                # Tail-position: each branch independently finishes the
-                # annotation dict and returns.  Run both branches to
-                # completion and merge with IfExp.
-                #
-                true_result: dict[str, ast.expr] = {}
-                _run(
-                    instructions,
-                    offset_to_idx,
-                    pc,
-                    list(stack),
-                    true_result,
-                    conditional,
-                )
-                false_result: dict[str, ast.expr] = {}
-                _run(
-                    instructions,
-                    offset_to_idx,
-                    else_idx,
-                    list(stack),
-                    false_result,
-                    conditional,
-                )
-                _merge_branch_results(
-                    result, true_result, false_result, test_node
-                )
-                return  # both branches returned; we're done
-
-        elif op == "CONTAINS_OP" and stack[-1] is _CONDITIONAL:
+        if op == "CONTAINS_OP" and stack[-1] is _CONDITIONAL:
             # `<index> in __conditional_annotations__`, guarding an
             # annotation that was defined under an if/for/etc.  Follow
             # the path that was actually taken.
             stack.pop()
             index_node = stack.pop()
             assert isinstance(index_node, ast.Constant)
-            jump_instr = instructions[pc]
+            jump_instr = bc.instructions[pc + 1]
             assert jump_instr.opname == "POP_JUMP_IF_FALSE"
-            pc += 1
             if conditional is None:
                 raise DecompileError(
                     "__conditional_annotations__ is not available"
                 )
-            if index_node.value not in conditional:
-                pc = offset_to_idx[jump_instr.argval]
+            if index_node.value in conditional:
+                pc += 2
+            else:
+                pc = bc.target(jump_instr)
+
+        elif in_comp and (
+            op == "YIELD_VALUE" or (op == "LIST_APPEND" and len(stack) < argval)
+        ):
+            # Appending to the comprehension's list, which is below the
+            # part of the stack we track.
+            result[_ELT_KEY] = stack.pop()
+            return
+
+        elif in_comp and op == "JUMP_BACKWARD":
+            result[_ELT_KEY] = _SKIP
+            return
+
+        elif (new_pc := _exec_op(bc, pc, stack)) is not None:
+            pc = new_pc
+
+        elif op in _COND_JUMPS:
+            new_pc = _fork(bc, pc, stack, result, conditional, in_comp)
+            if new_pc is None:
+                return
+            pc = new_pc
+
+        elif op == "JUMP_FORWARD":
+            pc = bc.target(instr)
 
         elif op == "RETURN_VALUE":
             if stack and stack[-1] is not _MAP:
                 result[_VALUE_KEY] = stack.pop()
             return
 
-        elif op in (
-            "RESUME",
-            "COPY_FREE_VARS",
-            "POP_JUMP_IF_FALSE",
-            "COMPARE_OP",
-            "LOAD_COMMON_CONSTANT",
-            "RAISE_VARARGS",
-        ):
-            pass
-
         else:
-            raise DecompileError(
-                f"Unsupported opcode: {op} (arg={arg}, argval={argval!r})"
-            )
-
-
-def _is_inline_ifexp(
-    instructions: list[dis.Instruction], true_start: int, else_idx: int
-) -> bool:
-    """Check if the true branch ends with JUMP_FORWARD (inline)
-    vs RETURN_VALUE (tail)."""
-    for i in range(true_start, else_idx):
-        if instructions[i].opname == "JUMP_FORWARD":
-            return True
-        if instructions[i].opname == "RETURN_VALUE":
-            return False
-    return False
-
-
-def _run_inline_ifexp(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
-    test: ast.expr,
-    pc: int,
-    else_idx: int,
-    stack: list[ast.expr],
-) -> tuple[ast.expr, int]:
-    """Decompile ``<true branch> JUMP_FORWARD(join) <false branch> join``,
-    with the true branch at `pc`.  Returns the IfExp and the join index.
-
-    The true branch can end in a nested if-expression whose jumps the
-    optimizer has threaded straight to our join, so find the join from
-    the jump just before the false branch rather than by running the
-    true branch.
-    """
-    jump = instructions[else_idx - 1]
-    assert jump.opname == "JUMP_FORWARD"
-    join_idx = offset_to_idx[jump.argval]
-    true_val, _ = _run_expr(
-        instructions, offset_to_idx, pc, list(stack), end=else_idx - 1
-    )
-    false_val, _ = _run_expr(
-        instructions, offset_to_idx, else_idx, list(stack), end=join_idx
-    )
-    return ast.IfExp(test=test, body=true_val, orelse=false_val), join_idx
-
-
-def _run_expr(
-    instructions: list[dis.Instruction],
-    offset_to_idx: dict[int, int],
-    pc: int,
-    stack: list[ast.expr],
-    end: int | None = None,
-) -> tuple[ast.expr, int]:
-    """Run bytecode for a single expression, returning the value and new pc.
-
-    Used for inline if-expression branches that produce exactly one value
-    on top of the initial stack.  Stops at JUMP_FORWARD, RETURN_VALUE,
-    or when reaching the `end` instruction index.
-    """
-    initial_depth = len(stack)
-    while pc < len(instructions):
-        if end is not None and pc >= end:
-            break
-        instr = instructions[pc]
-        op = instr.opname
-
-        # Stop when we hit branch-ending instructions
-        if op == "JUMP_FORWARD":
-            break
-        if op == "RETURN_VALUE":
-            break
-
-        # For nested inline if-expressions, handle TO_BOOL recursively
-        if op == "TO_BOOL":
-            test_node = stack.pop()
             pc += 1
-            while (
-                pc < len(instructions)
-                and instructions[pc].opname == "NOT_TAKEN"
-            ):
-                pc += 1
-            assert instructions[pc].opname == "POP_JUMP_IF_FALSE"
-            jump_instr = instructions[pc]
-            else_idx = offset_to_idx[jump_instr.argval]
-            pc += 1
-            while (
-                pc < len(instructions)
-                and instructions[pc].opname == "NOT_TAKEN"
-            ):
-                pc += 1
+            if op == "BUILD_MAP":
+                n = argval
+                if n == 0:
+                    stack.append(_MAP)
+                else:
+                    items = stack[-n * 2 :]
+                    del stack[-n * 2 :]
+                    for i in range(0, len(items), 2):
+                        key_node = items[i]
+                        val_node = items[i + 1]
+                        assert isinstance(key_node, ast.Constant)
+                        assert isinstance(key_node.value, str)
+                        result[key_node.value] = val_node
 
-            if _is_inline_ifexp(instructions, pc, else_idx):
-                value, pc = _run_inline_ifexp(
-                    instructions, offset_to_idx, test_node, pc, else_idx, stack
-                )
-                stack.append(value)
-            else:
+            elif op == "COPY":
+                stack.append(stack[-argval])
+
+            elif op == "POP_TOP":
+                stack.pop()
+
+            elif op == "STORE_SUBSCR":
+                key_node = stack.pop()
+                stack.pop()  # __map__ copy
+                val_node = stack.pop()
+                assert isinstance(key_node, ast.Constant)
+                assert isinstance(key_node.value, str)
+                result[key_node.value] = val_node
+
+            elif op not in ("RESUME", "COPY_FREE_VARS"):
                 raise DecompileError(
-                    "Nested tail-position if-expression in expression context"
+                    f"Unsupported opcode: {op} "
+                    f"(arg={instr.arg}, argval={argval!r})"
                 )
-            continue
 
-        new_pc = _exec_op(instructions, offset_to_idx, pc, stack)
-        if new_pc is not None:
-            pc = new_pc
-        else:
-            raise DecompileError(
-                f"Unsupported opcode in expr: {op} "
-                f"(arg={instr.arg}, argval={instr.argval!r})"
+
+def _fork(
+    bc: _Code,
+    pc: int,
+    stack: list[ast.expr],
+    result: dict[str, ast.expr],
+    conditional: collections.abc.Container[int] | None,
+    in_comp: bool,
+) -> int | None:
+    """Handle the conditional jump at `pc` by running both branches.
+
+    If the branches meet again, merge their stacks with if-expressions and
+    return where they meet.  Otherwise (e.g. if each branch returns), run
+    both to the end, merge their results, and return None.
+
+    This turns ``and``, ``or``, and ``not`` into nested if-expressions;
+    _simplify turns common cases back.
+    """
+    jump = bc.instructions[pc]
+    test = _strip_not_not(stack.pop())
+    if jump.opname in ("POP_JUMP_IF_NONE", "POP_JUMP_IF_NOT_NONE"):
+        test = ast.Compare(
+            left=test, ops=[ast.Is()], comparators=[ast.Constant(value=None)]
+        )
+    jumps_if_true = jump.opname in ("POP_JUMP_IF_TRUE", "POP_JUMP_IF_NONE")
+    branches = (bc.target(jump), pc + 1)
+    if not jumps_if_true:
+        branches = branches[::-1]
+
+    def make(if_true: ast.expr, if_false: ast.expr) -> ast.expr:
+        return _Fork(test, if_true, if_false, flip=jumps_if_true)
+
+    join = bc.join(*branches)
+    stacks: list[list[ast.expr]] = []
+    results: list[dict[str, ast.expr]] = []
+    for branch in branches:
+        # Different paths often reach the same code with the same stack
+        # (e.g. each value of an `or` can jump to the same place), and
+        # running it once per path would be exponential.
+        key = (branch, join, tuple(map(id, stack)))
+        if key not in bc.memo:
+            branch_stack = list(stack)
+            branch_result: dict[str, ast.expr] = {}
+            _run(
+                bc,
+                branch,
+                branch_stack,
+                branch_result,
+                conditional,
+                join,
+                in_comp,
             )
+            # Keep the stack alive so that the ids in the key stay valid.
+            bc.memo[key] = (list(stack), branch_stack, branch_result)
+        _, branch_stack, branch_result = bc.memo[key]
+        stacks.append(list(branch_stack))
+        results.append(dict(branch_result))
 
-    assert len(stack) == initial_depth + 1, (
-        f"Expression branch should produce exactly one value, "
-        f"got {len(stack) - initial_depth}"
-    )
-    return stack.pop(), pc
+    if join is None:
+        _merge_branch_results(result, results[0], results[1], make)
+        return None
+
+    assert not any(results), "Branches of an expression set results"
+    assert len(stacks[0]) == len(stacks[1])
+    stack[:] = [
+        a if a is b else make(a, b) for a, b in zip(*stacks, strict=True)
+    ]
+    return join
+
+
+class _Fork(ast.IfExp):
+    """An if-expression made from a conditional jump, before _simplify.
+
+    It can also be written as ``orelse if not test else body``, which is
+    preferred if `flip` (when the jump skips the source's true branch).
+    """
+
+    def __init__(
+        self,
+        test: ast.expr,
+        body: ast.expr,
+        orelse: ast.expr,
+        flip: bool,
+    ) -> None:
+        super().__init__(test=test, body=body, orelse=orelse)
+        self.flip = flip
+
+
+def _orientations(
+    node: ast.IfExp,
+) -> list[tuple[ast.expr, ast.expr, ast.expr]]:
+    """The ways to write `node` as (test, body, orelse), best first."""
+    plain = (node.test, node.body, node.orelse)
+    if not isinstance(node, _Fork):
+        return [plain]
+    flipped = (_negate(node.test), node.orelse, node.body)
+    return [flipped, plain] if node.flip else [plain, flipped]
+
+
+def _simplify(expr: ast.expr) -> ast.expr:
+    """Turn the nested if-expressions from _fork back into ``and``, ``or``,
+    and ``not`` where they have the shapes those compile to.
+
+    Works top-down, since for a chain of conditions, the outer one needs to
+    combine with its raw branches before they are simplified on their own.
+    """
+    cache: dict[int, tuple[ast.AST, ast.AST]] = {}
+
+    def same(a: ast.expr, b: ast.expr) -> bool:
+        return a is b or ast.dump(a) == ast.dump(b)
+
+    def simp(node: ast.AST) -> Any:
+        # Branches share subtrees (see _fork), so cache by identity.
+        if id(node) not in cache:
+            cache[id(node)] = (node, simp_uncached(node))
+        return cache[id(node)][1]
+
+    def simp_uncached(node: ast.AST) -> ast.AST:
+        if not isinstance(node, ast.IfExp):
+            changes = {}
+            for field, value in ast.iter_fields(node):
+                if isinstance(value, ast.AST):
+                    new_value: Any = simp(value)
+                elif isinstance(value, list):
+                    new_value = [
+                        simp(v) if isinstance(v, ast.AST) else v for v in value
+                    ]
+                else:
+                    continue
+                if new_value != value:
+                    changes[field] = new_value
+            if not changes:
+                return node
+            new = copy.copy(node)
+            for field, new_value in changes.items():
+                setattr(new, field, new_value)
+            return new
+
+        options = _orientations(node)
+        # `a or b` and `a and b` as values
+        for test, body, orelse in options:
+            if same(test, body):
+                return _or(simp(test), simp(orelse))
+            if same(test, orelse):
+                return _and(simp(test), simp(body))
+        # `x if a and b else y`
+        for test, body, orelse in options:
+            if isinstance(body, ast.IfExp):
+                for b_test, b_body, b_orelse in _orientations(body):
+                    if same(b_orelse, orelse):
+                        return simp(
+                            ast.IfExp(
+                                test=_and(test, b_test),
+                                body=b_body,
+                                orelse=orelse,
+                            )
+                        )
+        # `x if a or b else y`
+        for test, body, orelse in options:
+            new_orelse = simp(orelse)
+            if isinstance(new_orelse, ast.IfExp) and same(
+                new_orelse.body, simp(body)
+            ):
+                return ast.IfExp(
+                    test=_or(simp(test), new_orelse.test),
+                    body=new_orelse.body,
+                    orelse=new_orelse.orelse,
+                )
+        test, body, orelse = options[0]
+        return ast.IfExp(test=simp(test), body=simp(body), orelse=simp(orelse))
+
+    return simp(expr)
+
+
+def _and(a: ast.expr, b: ast.expr) -> ast.expr:
+    return _boolop(ast.And(), a, b)
+
+
+def _or(a: ast.expr, b: ast.expr) -> ast.expr:
+    return _boolop(ast.Or(), a, b)
+
+
+def _boolop(op: ast.boolop, a: ast.expr, b: ast.expr) -> ast.expr:
+    values = []
+    for v in (a, b):
+        if isinstance(v, ast.BoolOp) and type(v.op) is type(op):
+            values.extend(v.values)
+        else:
+            values.append(v)
+    return ast.BoolOp(op=op, values=values)
+
+
+def _negate(expr: ast.expr) -> ast.expr:
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+        return expr.operand
+    if (
+        isinstance(expr, ast.Compare)
+        and len(expr.ops) == 1
+        and isinstance(expr.ops[0], (ast.Is, ast.IsNot))
+        and isinstance(expr.comparators[0], ast.Constant)
+        and expr.comparators[0].value is None
+    ):
+        flipped = ast.IsNot() if isinstance(expr.ops[0], ast.Is) else ast.Is()
+        return ast.Compare(
+            left=expr.left, ops=[flipped], comparators=expr.comparators
+        )
+    return _not(expr)
 
 
 # ---------------------------------------------------------------------------
@@ -868,7 +1003,7 @@ def _run_expr(
 def _merge_values(
     true_val: ast.expr,
     false_val: ast.expr,
-    test: ast.expr,
+    make: Callable[[ast.expr, ast.expr], ast.expr],
 ) -> ast.expr:
     """Merge two branch values, using source positions to decide factoring.
 
@@ -901,12 +1036,12 @@ def _merge_values(
     # outside it.
     if isinstance(true_val, ast.Starred) and isinstance(false_val, ast.Starred):
         return ast.Starred(
-            value=_merge_values(true_val.value, false_val.value, test),
+            value=_merge_values(true_val.value, false_val.value, make),
             ctx=ast.Load(),
         )
 
     if not _same_span(true_val, false_val):
-        return ast.IfExp(test=test, body=true_val, orelse=false_val)
+        return make(true_val, false_val)
 
     # Same span — shared structure.  Recurse into matching node types.
 
@@ -914,8 +1049,8 @@ def _merge_values(
         false_val, ast.Subscript
     ):
         return ast.Subscript(
-            value=_merge_values(true_val.value, false_val.value, test),
-            slice=_merge_values(true_val.slice, false_val.slice, test),
+            value=_merge_values(true_val.value, false_val.value, make),
+            slice=_merge_values(true_val.slice, false_val.slice, make),
             ctx=ast.Load(),
         )
 
@@ -925,7 +1060,7 @@ def _merge_values(
         and len(true_val.elts) == len(false_val.elts)
     ):
         elts = [
-            _merge_values(t, f, test)
+            _merge_values(t, f, make)
             for t, f in zip(true_val.elts, false_val.elts, strict=True)
         ]
         return ast.Tuple(elts=elts, ctx=ast.Load())
@@ -935,8 +1070,8 @@ def _merge_values(
         and isinstance(false_val, ast.BinOp)
         and type(true_val.op) is type(false_val.op)
     ):
-        left = _merge_values(true_val.left, false_val.left, test)
-        right = _merge_values(true_val.right, false_val.right, test)
+        left = _merge_values(true_val.left, false_val.left, make)
+        right = _merge_values(true_val.right, false_val.right, make)
         return ast.BinOp(left=left, op=true_val.op, right=right)
 
     if (
@@ -945,21 +1080,22 @@ def _merge_values(
         and true_val.attr == false_val.attr
     ):
         return ast.Attribute(
-            value=_merge_values(true_val.value, false_val.value, test),
+            value=_merge_values(true_val.value, false_val.value, make),
             attr=true_val.attr,
             ctx=ast.Load(),
         )
 
-    return ast.IfExp(test=test, body=true_val, orelse=false_val)
+    return make(true_val, false_val)
 
 
 def _merge_branch_results(
     result: dict[str, ast.expr],
     true_branch: dict[str, ast.expr],
     false_branch: dict[str, ast.expr],
-    test: ast.expr,
+    make: Callable[[ast.expr, ast.expr], ast.expr],
 ) -> None:
-    """Merge results from two tail-position if-expression branches."""
+    """Merge results from two tail-position if-expression branches, using
+    `make` to make if-expressions."""
     all_keys = list(true_branch.keys())
     for k in false_branch:
         if k not in true_branch:
@@ -970,7 +1106,7 @@ def _merge_branch_results(
         false_val = false_branch.get(key)
 
         if true_val is not None and false_val is not None:
-            result[key] = _merge_values(true_val, false_val, test)
+            result[key] = _merge_values(true_val, false_val, make)
         elif true_val is not None:
             result[key] = true_val
         elif false_val is not None:
