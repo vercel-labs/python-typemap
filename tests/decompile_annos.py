@@ -216,10 +216,9 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
         "test_qblike_3::ColumnInitHasDefault",
         "test_qblike_3::ReadValueNeverNull",
         # `is`
-        "test_astlike_1::VarIsPresent",
-        "test_astlike_1::AllVarsPresent",
-        "test_qblike_3::EntriesHasTable",
         "test_type_dir::StrForInt",
+        # `and` in a generator expression
+        "test_astlike_1::VarIsPresent",
         # `if` clauses in comprehensions
         "test_eval_call_with_types::GetCallableMember",
         "test_qblike_3::AddTable",
@@ -229,9 +228,6 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
         "test_astlike_1::CombineVarArgs",
         "test_qblike_3::EntryFieldMembers",
         "test_qblike_3::MakeQueryEntryNamedFields",
-        # nested `for` in comprehensions
-        "test_type_dir::NoLiterals1",
-        "test_type_dir::NoLiterals2",
     }
 )
 
