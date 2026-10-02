@@ -225,6 +225,10 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         stack.pop()  # discard the attribute value (closure tuple, etc.)
         stack.append(func_node)
 
+    elif op == "UNPACK_SEQUENCE":
+        top = stack.pop()
+        stack.append(ast.Starred(value=top, ctx=ast.Load()))
+
     elif op in ("NOT_TAKEN", "PUSH_NULL"):
         pass
 
