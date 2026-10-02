@@ -442,12 +442,13 @@ def _get_comp_loop_var(
     instructions: list[dis.Instruction],
     pc: int,
 ) -> tuple[str, bool, int]:
-    """Extract loop variable from STORE_FAST or STORE_FAST_LOAD_FAST.
+    """Extract loop variable from STORE_FAST, STORE_DEREF (if it is
+    captured by a nested scope), or STORE_FAST_LOAD_FAST.
 
     Returns (var_name, has_initial_load, new_pc).
     """
     store = instructions[pc]
-    if store.opname == "STORE_FAST":
+    if store.opname in ("STORE_FAST", "STORE_DEREF"):
         return store.argval, False, pc + 1
     if store.opname == "STORE_FAST_LOAD_FAST":
         return store.argval[0], True, pc + 1
