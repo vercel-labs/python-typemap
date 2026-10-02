@@ -200,32 +200,10 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
     {
         # lambda in Annotated — not decompilable
         "_annos::fn57.return",
-        # `and` in if-expression conditions
-        "test_astlike_1::IsNumericAssignable",
-        "test_astlike_1::IsFloat",
-        "test_astlike_1::IsComplex",
-        "test_astlike_1::SimpleNumericOp",
-        "test_astlike_1::ComplexNumericOp",
-        "test_astlike_1::TrueDiv",
-        "test_nplike::MergeOne",
-        "test_qblike_3::ReplaceNever",
-        "test_type_dir::IsLiteral",
-        "test_ziplike::Zip",
-        "test_ziplike::ZipN",
-        # `not`
-        "test_qblike_3::ColumnInitHasDefault",
-        "test_qblike_3::ReadValueNeverNull",
-        # `is`
-        "test_type_dir::StrForInt",
-        # `and` in a generator expression
-        "test_astlike_1::VarIsPresent",
-        # conditions in comprehensions
-        "test_astlike_1::CombineVarArgs",
-        "test_qblike_3::MakeQueryEntryNamedFields",
+        # equivalent, but with and/or/not rearranged
         "test_eval_call_with_types::GetCallableMember",
-        "test_qblike_3::AddTable",
-        "test_qblike_3::AddField",
-        "test_qblike_3::Select",
+        "test_nplike::MergeOne",
+        "test_ziplike::Zip",
     }
 )
 
