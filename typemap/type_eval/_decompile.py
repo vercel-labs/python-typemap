@@ -46,6 +46,7 @@ _INTRINSIC_LIST_TO_TUPLE = 6
 # Stack sentinels (compared by identity)
 _CLASSDICT: ast.expr = ast.Name(id="__classdict__")
 _MAP: ast.expr = ast.Name(id="__map__")
+_CONDITIONAL: ast.expr = ast.Name(id="__conditional_annotations__")
 # Result key for the bare value returned by an evaluate_* function
 _VALUE_KEY = "<value>"
 
@@ -123,6 +124,12 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
 
     elif op == "LOAD_SMALL_INT":
         stack.append(_set_pos(ast.Constant(value=argval), instr))
+
+    elif argval == "__conditional_annotations__" and op in (
+        "LOAD_GLOBAL",
+        "LOAD_DEREF",
+    ):
+        stack.append(_CONDITIONAL)
 
     elif op in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_FAST_BORROW"):
         stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
@@ -473,8 +480,13 @@ def _decompile_inline_comp(
 
 def _decompile_bytecode(
     code: types.CodeType,
+    conditional: collections.abc.Container[int] | None = None,
 ) -> dict[str, ast.expr]:
-    """Walk __annotate__ bytecode and return {name: ast_expr}."""
+    """Walk __annotate__ bytecode and return {name: ast_expr}.
+
+    `conditional` is the value of ``__conditional_annotations__``: the
+    indices of the conditionally defined annotations that were executed.
+    """
     instructions = list(dis.get_instructions(code))
 
     # Build offset → index map for jump resolution
@@ -490,7 +502,7 @@ def _decompile_bytecode(
             break
 
     result: dict[str, ast.expr] = {}
-    _run(instructions, offset_to_idx, start, [], result)
+    _run(instructions, offset_to_idx, start, [], result, conditional)
     return result
 
 
@@ -500,6 +512,7 @@ def _run(
     pc: int,
     stack: list[ast.expr],
     result: dict[str, ast.expr],
+    conditional: collections.abc.Container[int] | None,
 ) -> None:
     """Execute bytecode from `pc`, mutating `stack` and `result`.
 
@@ -610,6 +623,7 @@ def _run(
                     pc,
                     list(stack),
                     true_result,
+                    conditional,
                 )
                 false_result: dict[str, ast.expr] = {}
                 _run(
@@ -618,11 +632,29 @@ def _run(
                     else_idx,
                     list(stack),
                     false_result,
+                    conditional,
                 )
                 _merge_branch_results(
                     result, true_result, false_result, test_node
                 )
                 return  # both branches returned; we're done
+
+        elif op == "CONTAINS_OP" and stack[-1] is _CONDITIONAL:
+            # `<index> in __conditional_annotations__`, guarding an
+            # annotation that was defined under an if/for/etc.  Follow
+            # the path that was actually taken.
+            stack.pop()
+            index_node = stack.pop()
+            assert isinstance(index_node, ast.Constant)
+            jump_instr = instructions[pc]
+            assert jump_instr.opname == "POP_JUMP_IF_FALSE"
+            pc += 1
+            if conditional is None:
+                raise DecompileError(
+                    "__conditional_annotations__ is not available"
+                )
+            if index_node.value not in conditional:
+                pc = offset_to_idx[jump_instr.argval]
 
         elif op == "RETURN_VALUE":
             if stack and stack[-1] is not _MAP:
@@ -914,7 +946,10 @@ def _collect_names(
         for instr in dis.get_instructions(code):
             if instr.opcode not in _NAME_OPS:
                 continue
-            if instr.opname == "LOAD_GLOBAL":
+            if (
+                instr.opname == "LOAD_GLOBAL"
+                and instr.argval != "__conditional_annotations__"
+            ):
                 global_names[instr.argval] = None
             vals = instr.argval
             for name in vals if isinstance(vals, tuple) else (vals,):
@@ -980,10 +1015,24 @@ class BindingMetadata:
     """
 
 
+def _get_cells(fn: types.FunctionType) -> dict[str, types.CellType]:
+    return dict(zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=True))
+
+
+def _get_conditional(fn: types.FunctionType) -> Any:
+    # Class scopes close over __conditional_annotations__; module scopes
+    # keep it in globals.
+    cell = _get_cells(fn).get("__conditional_annotations__")
+    if cell is None:
+        return fn.__globals__.get("__conditional_annotations__")
+    try:
+        return cell.cell_contents
+    except ValueError:
+        return None
+
+
 def _get_environment(fn: types.FunctionType) -> BindingEnvironment:
-    cells = dict(
-        zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=True)
-    )
+    cells = _get_cells(fn)
     classdict = None
     if "__classdict__" in cells:
         try:
@@ -1029,7 +1078,7 @@ def decompile_annotate(
         mangled_names=_find_mangled_names(all_names, class_name),
     )
     info = AnnotateInfo(metadata=metadata, env=_get_environment(fn))
-    result = _decompile_bytecode(code)
+    result = _decompile_bytecode(code, _get_conditional(fn))
     if _VALUE_KEY in result:
         return result[_VALUE_KEY], info
     return result, info
