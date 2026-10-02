@@ -229,11 +229,11 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
 
     elif op == "MAKE_FUNCTION":
         top = stack.pop()
-        # Keep listcomp code objects as markers for GET_ITER
+        # Keep comprehension code objects as markers for GET_ITER
         if (
             isinstance(top, ast.Constant)
             and isinstance(top.value, types.CodeType)
-            and top.value.co_name == "<listcomp>"
+            and top.value.co_name in ("<listcomp>", "<genexpr>")
         ):
             stack.append(top)
         else:
@@ -244,6 +244,12 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         target = stack[-argval]
         assert isinstance(target, ast.List)
         target.elts.append(ast.Starred(value=source, ctx=ast.Load()))
+
+    elif op == "CALL":
+        args = stack[len(stack) - argval :]
+        del stack[len(stack) - argval :]
+        func = stack.pop()
+        stack.append(ast.Call(func=func, args=args, keywords=[]))
 
     elif op == "LIST_APPEND":
         item = stack.pop()
@@ -280,6 +286,48 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
     return True
 
 
+def _exec_op(
+    instructions: list[dis.Instruction],
+    offset_to_idx: dict[int, int],
+    pc: int,
+    stack: list[ast.expr],
+) -> int | None:
+    """Execute the instruction at `pc` if it is an ordinary expression op.
+
+    Returns the index of the next instruction, or None if not handled.
+    """
+    instr = instructions[pc]
+    if (
+        target := _builtin_guard_at(instructions, offset_to_idx, pc)
+    ) is not None:
+        # Follow the plain call path rather than the inlined builtin.
+        return target
+    if instr.opname == "GET_ITER":
+        return _handle_get_iter(instructions, offset_to_idx, pc + 1, stack)
+    if _exec_stack_op(instr, stack):
+        return pc + 1
+    return None
+
+
+def _builtin_guard_at(
+    instructions: list[dis.Instruction],
+    offset_to_idx: dict[int, int],
+    pc: int,
+) -> int | None:
+    """Match ``COPY 1; LOAD_COMMON_CONSTANT; IS_OP 0; POP_JUMP_IF_FALSE``.
+
+    The compiler inlines calls like ``any(<genexpr>)``, guarded by a
+    check that the name still refers to the builtin; otherwise it jumps
+    to code for the plain call.  Returns the index of that code.
+    """
+    ops = [i.opname for i in instructions[pc : pc + 4]]
+    if ops != ["COPY", "LOAD_COMMON_CONSTANT", "IS_OP", "POP_JUMP_IF_FALSE"]:
+        return None
+    if instructions[pc].arg != 1 or instructions[pc + 2].arg != 0:
+        return None
+    return offset_to_idx[instructions[pc + 3].argval]
+
+
 def _handle_get_iter(
     instructions: list[dis.Instruction],
     offset_to_idx: dict[int, int],
@@ -298,7 +346,7 @@ def _handle_get_iter(
     ):
         # Pattern A: separate code object
         code_marker = stack.pop()
-        comp = _decompile_listcomp_code(code_marker.value, iterable_node)
+        comp = _decompile_comp_code(code_marker.value, iterable_node)
         stack.append(comp)
         # Skip the CALL instruction
         while pc < len(instructions) and instructions[pc].opname != "CALL":
@@ -343,7 +391,7 @@ def _decompile_comp_body(
         instr = instructions[pc]
         op = instr.opname
 
-        if op == "LIST_APPEND":
+        if op in ("LIST_APPEND", "YIELD_VALUE"):
             body = stack.pop()
             return body, filters, pc + 1
 
@@ -382,12 +430,12 @@ def _decompile_comp_body(
                 "Unexpected TO_BOOL pattern in comprehension body"
             )
 
-        pc += 1
-
-        if not _exec_stack_op(instr, stack):
+        new_pc = _exec_op(instructions, offset_to_idx, pc, stack)
+        if new_pc is None:
             raise DecompileError(f"Unsupported opcode in listcomp body: {op}")
+        pc = new_pc
 
-    raise DecompileError("LIST_APPEND not found in comprehension body")
+    raise DecompileError("End of comprehension body not found")
 
 
 def _get_comp_loop_var(
@@ -413,37 +461,46 @@ def _build_listcomp(
     filters: list[ast.expr],
     var_name: str,
     iterable: ast.expr,
-) -> ast.ListComp:
-    """Construct an ast.ListComp node."""
-    return ast.ListComp(
-        elt=body,
-        generators=[
-            ast.comprehension(
-                target=ast.Name(id=var_name, ctx=ast.Store()),
-                iter=iterable,
-                ifs=filters,
-                is_async=0,
-            )
-        ],
-    )
+    generator: bool = False,
+) -> ast.ListComp | ast.GeneratorExp:
+    """Construct an ast.ListComp (or ast.GeneratorExp) node."""
+    generators = [
+        ast.comprehension(
+            target=ast.Name(id=var_name, ctx=ast.Store()),
+            iter=iterable,
+            ifs=filters,
+            is_async=0,
+        )
+    ]
+    if generator:
+        return ast.GeneratorExp(elt=body, generators=generators)
+    return ast.ListComp(elt=body, generators=generators)
 
 
-def _decompile_listcomp_code(
+def _decompile_comp_code(
     code: types.CodeType,
     iterable: ast.expr,
-) -> ast.ListComp:
-    """Decompile a separate <listcomp> code object (Pattern A).
+) -> ast.ListComp | ast.GeneratorExp:
+    """Decompile a separate <listcomp> or <genexpr> code object (Pattern A).
 
-    Used for class body and method annotations where the comprehension
-    is compiled as its own code object, called via MAKE_FUNCTION + CALL.
+    Used for generator expressions, and for list comprehensions in class
+    body and method annotations, where the comprehension is compiled as
+    its own code object, called via MAKE_FUNCTION + CALL.
     """
     instrs, off_to_idx = _get_instructions(code)
 
-    # Skip preamble: COPY_FREE_VARS, RESUME, BUILD_LIST 0, LOAD_FAST .0
+    # Skip preamble: COPY_FREE_VARS, RESUME, BUILD_LIST 0 (or
+    # RETURN_GENERATOR, POP_TOP), LOAD_FAST .0
     pc = 0
     while pc < len(instrs):
         op = instrs[pc].opname
-        if op in ("COPY_FREE_VARS", "RESUME", "BUILD_LIST"):
+        if op in (
+            "COPY_FREE_VARS",
+            "RESUME",
+            "BUILD_LIST",
+            "RETURN_GENERATOR",
+            "POP_TOP",
+        ):
             pc += 1
         elif op == "LOAD_FAST" and instrs[pc].argval == ".0":
             pc += 1
@@ -460,7 +517,9 @@ def _decompile_listcomp_code(
     body, filters, _ = _decompile_comp_body(
         instrs, off_to_idx, pc, var_name, has_load
     )
-    return _build_listcomp(body, filters, var_name, iterable)
+    return _build_listcomp(
+        body, filters, var_name, iterable, code.co_name == "<genexpr>"
+    )
 
 
 def _decompile_inline_comp(
@@ -468,7 +527,7 @@ def _decompile_inline_comp(
     offset_to_idx: dict[int, int],
     pc: int,
     iterable: ast.expr,
-) -> tuple[ast.ListComp, int]:
+) -> tuple[ast.ListComp | ast.GeneratorExp, int]:
     """Decompile an inlined comprehension (Pattern B).
 
     Used for module-level function annotations where the comprehension
@@ -555,8 +614,10 @@ def _run(
         argval = instr.argval
         pc += 1
 
-        if _exec_stack_op(instr, stack):
-            pass
+        if (
+            new_pc := _exec_op(instructions, offset_to_idx, pc - 1, stack)
+        ) is not None:
+            pc = new_pc
 
         elif op == "BUILD_MAP":
             n = argval
@@ -582,9 +643,6 @@ def _run(
             assert isinstance(key_node, ast.Constant)
             assert isinstance(key_node.value, str)
             result[key_node.value] = val_node
-
-        elif op == "GET_ITER":
-            pc = _handle_get_iter(instructions, offset_to_idx, pc, stack)
 
         elif op == "TO_BOOL":
             # The test expression is on top of stack.  The next meaningful
@@ -779,12 +837,9 @@ def _run_expr(
                 )
             continue
 
-        pc += 1
-
-        if _exec_stack_op(instr, stack):
-            pass
-        elif op == "GET_ITER":
-            pc = _handle_get_iter(instructions, offset_to_idx, pc, stack)
+        new_pc = _exec_op(instructions, offset_to_idx, pc, stack)
+        if new_pc is not None:
+            pc = new_pc
         else:
             raise DecompileError(
                 f"Unsupported opcode in expr: {op} "
