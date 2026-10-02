@@ -32,6 +32,7 @@ import ast
 import collections.abc
 import dataclasses
 import dis
+import math
 import types
 from typing import Any, Union
 
@@ -58,11 +59,18 @@ class DecompileError(Exception):
 def _const_to_ast(value: Any) -> ast.expr:
     """Convert a Python constant to an AST node.
 
-    Tuples become ast.Tuple of their elements (recursively).
+    Tuples become ast.Tuple of their elements (recursively), and
+    negative numbers (which the compiler folds) become negations.
     Everything else becomes ast.Constant.
     """
     if isinstance(value, tuple):
         return ast.Tuple(elts=[_const_to_ast(v) for v in value], ctx=ast.Load())
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.copysign(1, value) < 0
+    ):
+        return ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=-value))
     return ast.Constant(value=value)
 
 
