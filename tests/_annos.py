@@ -535,6 +535,10 @@ def fn108[T]() -> tuple[int if T else str, float]: ...
 def fn109[T]() -> Callable[[int if T else str], bool]: ...
 
 
+# Tail position in an evaluate function: both branches extend the same list.
+type StarredIfExp[T] = tuple[*([] if T else [int])]
+
+
 # ---------------------------------------------------------------------------
 # Outer if-expressions (NOT factored into inner position)
 # ---------------------------------------------------------------------------
