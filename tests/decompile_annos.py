@@ -219,15 +219,13 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
         "test_type_dir::StrForInt",
         # `and` in a generator expression
         "test_astlike_1::VarIsPresent",
-        # `if` clauses in comprehensions
+        # conditions in comprehensions
+        "test_astlike_1::CombineVarArgs",
+        "test_qblike_3::MakeQueryEntryNamedFields",
         "test_eval_call_with_types::GetCallableMember",
         "test_qblike_3::AddTable",
         "test_qblike_3::AddField",
         "test_qblike_3::Select",
-        # comprehension loop variable captured by a nested scope
-        "test_astlike_1::CombineVarArgs",
-        "test_qblike_3::EntryFieldMembers",
-        "test_qblike_3::MakeQueryEntryNamedFields",
     }
 )
 
