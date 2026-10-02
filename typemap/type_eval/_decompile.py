@@ -677,24 +677,10 @@ def _run(
             # JUMP_FORWARD) or tail-position (true branch ends with
             # RETURN_VALUE).
             if _is_inline_ifexp(instructions, pc, else_idx):
-                # Inline: true_branch JUMP_FORWARD(join) false_branch join
-                true_val, pc = _run_expr(
-                    instructions, offset_to_idx, pc, list(stack)
+                value, pc = _run_inline_ifexp(
+                    instructions, offset_to_idx, test_node, pc, else_idx, stack
                 )
-                # pc now points at JUMP_FORWARD
-                assert instructions[pc].opname == "JUMP_FORWARD"
-                join_idx = offset_to_idx[instructions[pc].argval]
-                false_val, _ = _run_expr(
-                    instructions,
-                    offset_to_idx,
-                    else_idx,
-                    list(stack),
-                    end=join_idx,
-                )
-                stack.append(
-                    ast.IfExp(test=test_node, body=true_val, orelse=false_val)
-                )
-                pc = join_idx  # continue after the join point
+                stack.append(value)
             else:
                 # Tail-position: each branch independently finishes the
                 # annotation dict and returns.  Run both branches to
@@ -774,6 +760,34 @@ def _is_inline_ifexp(
     return False
 
 
+def _run_inline_ifexp(
+    instructions: list[dis.Instruction],
+    offset_to_idx: dict[int, int],
+    test: ast.expr,
+    pc: int,
+    else_idx: int,
+    stack: list[ast.expr],
+) -> tuple[ast.expr, int]:
+    """Decompile ``<true branch> JUMP_FORWARD(join) <false branch> join``,
+    with the true branch at `pc`.  Returns the IfExp and the join index.
+
+    The true branch can end in a nested if-expression whose jumps the
+    optimizer has threaded straight to our join, so find the join from
+    the jump just before the false branch rather than by running the
+    true branch.
+    """
+    jump = instructions[else_idx - 1]
+    assert jump.opname == "JUMP_FORWARD"
+    join_idx = offset_to_idx[jump.argval]
+    true_val, _ = _run_expr(
+        instructions, offset_to_idx, pc, list(stack), end=else_idx - 1
+    )
+    false_val, _ = _run_expr(
+        instructions, offset_to_idx, else_idx, list(stack), end=join_idx
+    )
+    return ast.IfExp(test=test, body=true_val, orelse=false_val), join_idx
+
+
 def _run_expr(
     instructions: list[dis.Instruction],
     offset_to_idx: dict[int, int],
@@ -820,18 +834,10 @@ def _run_expr(
                 pc += 1
 
             if _is_inline_ifexp(instructions, pc, else_idx):
-                true_val, pc = _run_expr(
-                    instructions, offset_to_idx, pc, list(stack)
+                value, pc = _run_inline_ifexp(
+                    instructions, offset_to_idx, test_node, pc, else_idx, stack
                 )
-                assert instructions[pc].opname == "JUMP_FORWARD"
-                join_idx = offset_to_idx[instructions[pc].argval]
-                false_val, _ = _run_expr(
-                    instructions, offset_to_idx, else_idx, list(stack)
-                )
-                stack.append(
-                    ast.IfExp(test=test_node, body=true_val, orelse=false_val)
-                )
-                pc = join_idx
+                stack.append(value)
             else:
                 raise DecompileError(
                     "Nested tail-position if-expression in expression context"
