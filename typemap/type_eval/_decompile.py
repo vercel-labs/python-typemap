@@ -285,11 +285,31 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         target.elts = [*target.elts, item]
         stack[-argval] = target
 
+    elif (
+        op == "CALL"
+        and argval == 0
+        and len(stack) >= 2
+        and isinstance(stack[-2], ast.Constant)
+        and isinstance(stack[-2].value, types.CodeType)
+    ):
+        # Since 3.15, a comprehension's code object is called with its
+        # iterable directly, rather than after GET_ITER.
+        iterable = stack.pop()
+        code_marker = stack.pop()
+        assert isinstance(code_marker, ast.Constant)
+        stack.append(_decompile_comp_code(code_marker.value, iterable))
+
     elif op == "CALL":
         args = stack[len(stack) - argval :]
         del stack[len(stack) - argval :]
         func = stack.pop()
         stack.append(ast.Call(func=func, args=args, keywords=[]))
+
+    elif op == "LOAD_COMMON_CONSTANT" and (
+        argval is None or isinstance(argval, (bool, int, float, str))
+    ):
+        # Since 3.15, used for some ordinary constants
+        stack.append(_set_pos(_const_to_ast(argval), instr))
 
     elif op == "CALL_INTRINSIC_1":
         if arg == _INTRINSIC_LIST_TO_TUPLE:
@@ -412,7 +432,9 @@ def _exec_op(bc: _Code, pc: int, stack: list[ast.expr]) -> int | None:
     if (target := _builtin_guard_at(bc, pc)) is not None:
         # Follow the plain call path rather than the inlined builtin.
         return target
-    if instr.opname == "GET_ITER":
+    # An inlined comprehension starts with GET_ITER, or since 3.15 (which
+    # moves GET_ITER later), by saving the loop variable.
+    if instr.opname in ("GET_ITER", "LOAD_FAST_AND_CLEAR"):
         return _handle_get_iter(bc, pc + 1, stack)
     if _exec_stack_op(instr, stack):
         return pc + 1
@@ -589,28 +611,11 @@ def _decompile_comp_code(
     bc = _Code(*_get_instructions(code))
     instrs = bc.instructions
 
-    # Skip preamble: COPY_FREE_VARS, RESUME, BUILD_LIST 0 (or
-    # RETURN_GENERATOR, POP_TOP), LOAD_FAST .0
+    # Skip the preamble (getting the iterator, setting up the list or
+    # generator, etc.)
     pc = 0
-    while pc < len(instrs):
-        op = instrs[pc].opname
-        if op in (
-            "COPY_FREE_VARS",
-            "RESUME",
-            "BUILD_LIST",
-            "RETURN_GENERATOR",
-            "POP_TOP",
-        ):
-            pc += 1
-        elif op == "LOAD_FAST" and instrs[pc].argval == ".0":
-            pc += 1
-            break
-        else:
-            break
-
-    assert instrs[pc].opname == "FOR_ITER", (
-        f"Expected FOR_ITER, got {instrs[pc].opname}"
-    )
+    while instrs[pc].opname != "FOR_ITER":
+        pc += 1
     pc += 1
 
     var_name, has_load, pc = _get_comp_loop_var(instrs, pc)
