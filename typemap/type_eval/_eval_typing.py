@@ -34,14 +34,18 @@ class StuckException(Exception):
 
 
 _eval_funcs: dict[type, typing.Callable[..., Any]] = {}
+# Evaluators that receive their arguments unevaluated
+_lazy_eval_funcs: set[type] = set()
 
 
 def register_evaluator[T: typing.Callable[..., Any]](
-    typ: type,
+    typ: type, *, lazy: bool = False
 ) -> typing.Callable[[T], T]:
     def func(f: T) -> T:
         assert typ not in _eval_funcs
         _eval_funcs[typ] = f
+        if lazy:
+            _lazy_eval_funcs.add(typ)
         return f
 
     return func
@@ -427,6 +431,9 @@ def _eval_applied_class(obj: typing_GenericAlias, ctx: EvalContext):
     """Eval a typing._GenericAlias -- an applied user-defined class"""
     # generic *classes* are typing._GenericAlias while generic type
     # aliases are types.GenericAlias? Why in the world.
+    if obj.__origin__ in _lazy_eval_funcs:
+        return _eval_funcs[obj.__origin__](*typing.get_args(obj), ctx=ctx)
+
     new_args = _eval_args(typing.get_args(obj), ctx)
 
     if func := _eval_funcs.get(obj.__origin__):
@@ -461,6 +468,4 @@ def _eval_callable(obj: typing_CallableGenericAlias, ctx: EvalContext):
 
 @_eval_types_impl.register
 def _eval_union(obj: typing.Union, ctx: EvalContext):
-    args: typing.Sequence[typing.Any] = obj.__args__
-    new_args = tuple(_eval_types(arg, ctx) for arg in args)
-    return typing.Union[new_args]
+    return typing.Union[_eval_args(obj.__args__, ctx)]
