@@ -1,8 +1,9 @@
+# SKIP MYPY: imports the deliberately unchecked annotation fixtures
 """Test harness: run the annotation decompiler and compare with string-form
 ASTs produced via ``from __future__ import annotations``.
 
-Works both as ``python -m tests.decompile_annos [paths…]`` (summary printout)
-and via ``pytest tests/decompile_annos.py`` (one test case per annotation).
+Works both as ``python -m tests.test_decompile_annos [paths…]`` (summary printout)
+and via ``pytest tests/test_decompile_annos.py`` (one test case per annotation).
 
 With no paths, all ``.py`` files in the ``tests/`` directory are checked.
 """
@@ -34,7 +35,9 @@ from typemap.type_eval._decompile import (
 
 TESTS_DIR = pathlib.Path(__file__).parent
 
-_SKIP_FILES = frozenset({"decompile_annos.py", "dump_annos.py", "__init__.py"})
+_SKIP_FILES = frozenset(
+    {"test_decompile_annos.py", "dump_annos.py", "__init__.py"}
+)
 
 
 # ---------------------------------------------------------------------------
