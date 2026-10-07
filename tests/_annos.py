@@ -544,6 +544,12 @@ def fn120[T, U]() -> tuple[(str if U else bytes) if T else int, float]: ...
 # Tail position in an evaluate function: both branches extend the same list.
 type StarredIfExp[T] = tuple[*([] if T else [int])]
 
+# Tail position inside other kinds of shared structure
+type CallIfExp[T] = Annotated[int, len(str if T else bytes)]
+type CompareIfExp[T] = Literal[(str if T else bytes) in int]
+type NotIfExp[T] = not (str if T else bytes)
+type ListStarredIfExp[T] = tuple[[*(str if T else bytes)]]
+
 
 # ---------------------------------------------------------------------------
 # Outer if-expressions (NOT factored into inner position)

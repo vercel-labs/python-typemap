@@ -1,8 +1,10 @@
 """Decompile __annotate__ bytecode back into AST expression nodes.
 
-Python 3.14 (PEP 649) generates __annotate__ methods for functions and classes
-that construct annotation dicts from bytecode.  This module walks the bytecode
-with a virtual stack and reconstructs equivalent ast.expr trees.
+Python 3.14 (PEP 649) generates __annotate__ functions for functions and
+classes that construct annotation dicts from bytecode, and evaluate_*
+functions for type alias values, TypeVar bounds, etc.  This module runs the
+bytecode on a virtual stack of ast.expr nodes to reconstruct the source
+expressions.
 
 Two dict-building patterns exist:
 
@@ -12,18 +14,13 @@ Two dict-building patterns exist:
   Class annotations:
     BUILD_MAP 0  <expr> COPY 2 LOAD_CONST 'key' STORE_SUBSCR ...
 
-Either pattern may contain if-expressions (control flow):
-
-  Inline (non-last annotation):
-    TO_BOOL POP_JUMP_IF_FALSE <true> JUMP_FORWARD <false>
-
-  Tail-position (last annotation):
-    TO_BOOL POP_JUMP_IF_FALSE <true+return> <false+return>
-
-For tail-position if-expressions, the compiler duplicates surrounding context
-into both branches.  Source position info on bytecode instructions distinguishes
-shared structure (same source span → factor into inner IfExp) from independent
-structure (different span → wrap with outer IfExp).
+Conditional jumps (from if-expressions, ``and``, ``or``, and ``not``) are
+handled by running both branches up to where they meet and merging their
+stacks into if-expressions (see _fork); _simplify then recovers boolean
+operators.  For an if-expression in tail position, the compiler duplicates
+the rest of the code into both branches, which then never meet.  Source
+positions distinguish the duplicated structure, which is factored out of the
+if-expression, from independent structure (see _merge_values).
 """
 
 from __future__ import annotations
@@ -35,7 +32,7 @@ import dataclasses
 import dis
 import math
 import types
-from typing import Any, Callable, Union
+from typing import Any, Callable, TypeIs
 
 
 # BINARY_OP arg constants (from dis._nb_ops)
@@ -45,10 +42,6 @@ _NB_SUBSCR = 26  # []
 # CALL_INTRINSIC_1 arg constants
 _INTRINSIC_LIST_TO_TUPLE = 6
 
-# Stack sentinels (compared by identity)
-_CLASSDICT: ast.expr = ast.Name(id="__classdict__")
-_MAP: ast.expr = ast.Name(id="__map__")
-_CONDITIONAL: ast.expr = ast.Name(id="__conditional_annotations__")
 _CMP_OPS: dict[str, type[ast.cmpop]] = {
     "<": ast.Lt,
     "<=": ast.LtE,
@@ -57,6 +50,11 @@ _CMP_OPS: dict[str, type[ast.cmpop]] = {
     ">": ast.Gt,
     ">=": ast.GtE,
 }
+
+# Stack sentinels (compared by identity)
+_CLASSDICT: ast.expr = ast.Name(id="__classdict__")
+_MAP: ast.expr = ast.Name(id="__map__")
+_CONDITIONAL: ast.expr = ast.Name(id="__conditional_annotations__")
 
 # Result keys for the bare value returned by an evaluate_* function, and
 # for the element of a comprehension
@@ -173,11 +171,22 @@ def _strip_not_not(expr: ast.expr) -> ast.expr:
     return expr
 
 
-def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
-    """Execute a stack-only opcode (no pc modification needed).
+def _code_of(node: ast.expr) -> types.CodeType | None:
+    if isinstance(node, ast.Constant) and isinstance(
+        node.value, types.CodeType
+    ):
+        return node.value
+    return None
 
-    Handles all LOAD_*, BINARY_OP, BUILD_TUPLE/LIST, MAKE_FUNCTION,
-    LIST_EXTEND, LIST_APPEND, CALL_INTRINSIC_1, and no-ops.
+
+def _pop_n(stack: list[ast.expr], n: int) -> list[ast.expr]:
+    items = stack[len(stack) - n :]
+    del stack[len(stack) - n :]
+    return items
+
+
+def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
+    """Execute an opcode that only operates on the stack.
 
     Returns True if the opcode was handled, False otherwise.
     """
@@ -207,8 +216,8 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
             stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
 
     elif op in ("LOAD_FROM_DICT_OR_GLOBALS", "LOAD_FROM_DICT_OR_DEREF"):
-        if stack and stack[-1] is _CLASSDICT:
-            stack.pop()
+        if stack.pop() is not _CLASSDICT:
+            raise DecompileError(f"{op} from something besides __classdict__")
         stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
 
     elif op == "LOAD_ATTR":
@@ -245,31 +254,18 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
             raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
 
     elif op == "BUILD_TUPLE":
-        n = argval
-        if n:
-            elts = stack[-n:]
-            del stack[-n:]
-        else:
-            elts = []
+        elts = _pop_n(stack, argval)
         stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
 
     elif op == "BUILD_LIST":
-        n = argval
-        if n:
-            elts = stack[-n:]
-            del stack[-n:]
-        else:
-            elts = []
+        elts = _pop_n(stack, argval)
         stack.append(_set_pos(ast.List(elts=elts, ctx=ast.Load()), instr))
 
     elif op == "MAKE_FUNCTION":
         top = stack.pop()
-        # Keep comprehension code objects as markers for GET_ITER
-        if (
-            isinstance(top, ast.Constant)
-            and isinstance(top.value, types.CodeType)
-            and top.value.co_name in ("<listcomp>", "<genexpr>")
-        ):
+        # Keep comprehension code objects for CALL
+        code = _code_of(top)
+        if code and code.co_name in ("<listcomp>", "<genexpr>"):
             stack.append(top)
         else:
             stack.append(_set_pos(ast.Constant(value="<function>"), instr))
@@ -289,21 +285,20 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         op == "CALL"
         and argval == 0
         and len(stack) >= 2
-        and isinstance(stack[-2], ast.Constant)
-        and isinstance(stack[-2].value, types.CodeType)
+        and (code := _code_of(stack[-2]))
     ):
-        # Since 3.15, a comprehension's code object is called with its
-        # iterable directly, rather than after GET_ITER.
+        # A comprehension compiled as its own code object (see
+        # _decompile_comp_code), called with its iterable.
         iterable = stack.pop()
-        code_marker = stack.pop()
-        assert isinstance(code_marker, ast.Constant)
-        stack.append(_decompile_comp_code(code_marker.value, iterable))
+        stack.pop()
+        stack.append(_decompile_comp_code(code, iterable))
 
     elif op == "CALL":
-        args = stack[len(stack) - argval :]
-        del stack[len(stack) - argval :]
+        args = _pop_n(stack, argval)
         func = stack.pop()
-        stack.append(ast.Call(func=func, args=args, keywords=[]))
+        stack.append(
+            _set_pos(ast.Call(func=func, args=args, keywords=[]), instr)
+        )
 
     elif op == "LOAD_COMMON_CONSTANT" and (
         argval is None or isinstance(argval, (bool, int, float, str))
@@ -328,12 +323,15 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         stack.append(func_node)
 
     elif op == "UNPACK_SEQUENCE":
+        # `*x` in a subscript or a `*args` annotation
+        if argval != 1:
+            raise DecompileError(f"Unsupported UNPACK_SEQUENCE arg {argval}")
         top = stack.pop()
         stack.append(ast.Starred(value=top, ctx=ast.Load()))
 
     elif op == "TO_BOOL":
         # Usually this feeds a jump or UNARY_NOT, but on its own it is
-        # what `not not x` compiles to.  Jumps strip it (see _make_atom).
+        # what `not not x` compiles to.  Jumps strip it (see _fork).
         operand = stack.pop()
         if not _is_bool_expr(operand):
             operand = _not(_not(operand))
@@ -432,10 +430,17 @@ def _exec_op(bc: _Code, pc: int, stack: list[ast.expr]) -> int | None:
     if (target := _builtin_guard_at(bc, pc)) is not None:
         # Follow the plain call path rather than the inlined builtin.
         return target
+    if instr.opname == "GET_ITER" and len(stack) >= 2 and _code_of(stack[-2]):
+        # The iterable for a comprehension's code object, which CALL
+        # handles.  (Since 3.15, there is no GET_ITER here.)
+        return pc + 1
     # An inlined comprehension starts with GET_ITER, or since 3.15 (which
     # moves GET_ITER later), by saving the loop variable.
     if instr.opname in ("GET_ITER", "LOAD_FAST_AND_CLEAR"):
-        return _handle_get_iter(bc, pc + 1, stack)
+        iterable = stack.pop()
+        comp, pc = _decompile_inline_comp(bc, pc + 1, iterable)
+        stack.append(comp)
+        return pc
     if _exec_stack_op(instr, stack):
         return pc + 1
     return None
@@ -457,56 +462,36 @@ def _builtin_guard_at(bc: _Code, pc: int) -> int | None:
     return bc.target(instrs[3])
 
 
-def _handle_get_iter(bc: _Code, pc: int, stack: list[ast.expr]) -> int:
-    """Handle GET_ITER: pop iterable, dispatch to Pattern A or B.
-
-    Returns the new pc (advanced past the comprehension instructions).
-    """
-    iterable_node = stack.pop()
-    if (
-        stack
-        and isinstance(stack[-1], ast.Constant)
-        and isinstance(stack[-1].value, types.CodeType)
-    ):
-        # Pattern A: separate code object
-        code_marker = stack.pop()
-        comp = _decompile_comp_code(code_marker.value, iterable_node)
-        stack.append(comp)
-        # Skip the CALL instruction
-        while (
-            pc < len(bc.instructions) and bc.instructions[pc].opname != "CALL"
-        ):
-            pc += 1
-        pc += 1  # skip CALL itself
-    else:
-        # Pattern B: inlined comprehension
-        comp, pc = _decompile_inline_comp(bc, pc, iterable_node)
-        stack.append(comp)
-    return pc
-
-
 # ---------------------------------------------------------------------------
 # Comprehension decompilation
 # ---------------------------------------------------------------------------
 
 
-def _decompile_comp_body(
-    bc: _Code,
-    pc: int,
-    var_name: str,
-    has_initial_load: bool,
-) -> tuple[ast.expr, list[ast.expr]]:
-    """Decompile a comprehension body, starting after the loop variable is
-    stored.  Returns (element, filters).
+def _decompile_loop(
+    bc: _Code, pc: int
+) -> tuple[ast.Name, ast.expr, list[ast.expr], int]:
+    """Decompile a comprehension's loop, starting from somewhere before its
+    FOR_ITER.  Returns (target, element, filters, index of FOR_ITER).
 
     The body is run like any other code (see _run), except that it ends
     either by appending an element or by skipping to the next iteration.
     """
+    while bc.instructions[pc].opname != "FOR_ITER":
+        pc += 1
+    for_iter = pc
+
     stack: list[ast.expr] = []
-    if has_initial_load:
-        stack.append(ast.Name(id=var_name, ctx=ast.Load()))
+    store = bc.instructions[pc + 1]
+    # The loop variable is a cell if a nested scope captures it.
+    if store.opname in ("STORE_FAST", "STORE_DEREF"):
+        var_name = store.argval
+    elif store.opname == "STORE_FAST_LOAD_FAST":
+        var_name = store.argval[0]
+        stack.append(ast.Name(id=store.argval[1], ctx=ast.Load()))
+    else:
+        raise DecompileError(f"Unsupported loop variable store {store.opname}")
     result: dict[str, ast.expr] = {}
-    _run(bc, pc, stack, result, None, in_comp=True)
+    _run(bc, pc + 2, stack, result, None, in_comp=True)
 
     elt = _simplify(result[_ELT_KEY])
     filters: list[ast.expr] = []
@@ -522,15 +507,17 @@ def _decompile_comp_body(
     if any(node is _SKIP for node in ast.walk(elt)):
         # The skips are mixed in with if-expressions.  If those all pick
         # the same element, they're really just a complicated filter.
-        leaves = _ifexp_leaves(elt)
-        kept = [leaf for leaf in leaves if leaf is not _SKIP]
-        if any(ast.dump(leaf) != ast.dump(kept[0]) for leaf in kept):
+        kept = [leaf for leaf in _ifexp_leaves(elt) if leaf is not _SKIP]
+        if not kept or any(
+            ast.dump(leaf) != ast.dump(kept[0]) for leaf in kept
+        ):
             raise DecompileError("Unsupported filter in comprehension")
         cond = _filter_condition(elt)
         assert isinstance(cond, ast.expr)
         filters.append(cond)
         elt = kept[0]
-    return elt, filters
+    target = ast.Name(id=var_name, ctx=ast.Store())
+    return target, elt, filters, for_iter
 
 
 def _ifexp_leaves(expr: ast.expr) -> list[ast.expr]:
@@ -558,104 +545,41 @@ def _filter_condition(expr: ast.expr) -> ast.expr | bool:
     return ast.IfExp(test=test, body=body, orelse=orelse)
 
 
-def _get_comp_loop_var(
-    instructions: list[dis.Instruction],
-    pc: int,
-) -> tuple[str, bool, int]:
-    """Extract loop variable from STORE_FAST, STORE_DEREF (if it is
-    captured by a nested scope), or STORE_FAST_LOAD_FAST.
-
-    Returns (var_name, has_initial_load, new_pc).
-    """
-    store = instructions[pc]
-    if store.opname in ("STORE_FAST", "STORE_DEREF"):
-        return store.argval, False, pc + 1
-    if store.opname == "STORE_FAST_LOAD_FAST":
-        return store.argval[0], True, pc + 1
-    raise DecompileError(
-        f"Expected STORE_FAST after FOR_ITER, got {store.opname}"
-    )
-
-
-def _build_listcomp(
-    body: ast.expr,
-    filters: list[ast.expr],
-    var_name: str,
-    iterable: ast.expr,
-    generator: bool = False,
-) -> ast.ListComp | ast.GeneratorExp:
-    """Construct an ast.ListComp (or ast.GeneratorExp) node."""
-    generators = [
-        ast.comprehension(
-            target=ast.Name(id=var_name, ctx=ast.Store()),
-            iter=iterable,
-            ifs=filters,
-            is_async=0,
-        )
-    ]
-    if generator:
-        return ast.GeneratorExp(elt=body, generators=generators)
-    return ast.ListComp(elt=body, generators=generators)
-
-
 def _decompile_comp_code(
     code: types.CodeType,
     iterable: ast.expr,
 ) -> ast.ListComp | ast.GeneratorExp:
-    """Decompile a separate <listcomp> or <genexpr> code object (Pattern A).
+    """Decompile a separate <listcomp> or <genexpr> code object.
 
     Used for generator expressions, and for list comprehensions in class
-    body and method annotations, where the comprehension is compiled as
-    its own code object, called via MAKE_FUNCTION + CALL.
+    scopes, which aren't inlined.
     """
-    bc = _Code(*_get_instructions(code))
-    instrs = bc.instructions
-
-    # Skip the preamble (getting the iterator, setting up the list or
-    # generator, etc.)
-    pc = 0
-    while instrs[pc].opname != "FOR_ITER":
-        pc += 1
-    pc += 1
-
-    var_name, has_load, pc = _get_comp_loop_var(instrs, pc)
-    body, filters = _decompile_comp_body(bc, pc, var_name, has_load)
-    return _build_listcomp(
-        body, filters, var_name, iterable, code.co_name == "<genexpr>"
+    target, elt, filters, _ = _decompile_loop(
+        _Code(*_get_instructions(code)), 0
     )
+    generators = [ast.comprehension(target, iterable, filters, is_async=0)]
+    if code.co_name == "<genexpr>":
+        return ast.GeneratorExp(elt=elt, generators=generators)
+    return ast.ListComp(elt=elt, generators=generators)
 
 
 def _decompile_inline_comp(
     bc: _Code,
     pc: int,
     iterable: ast.expr,
-) -> tuple[ast.ListComp | ast.GeneratorExp, int]:
-    """Decompile an inlined comprehension (Pattern B).
+) -> tuple[ast.ListComp, int]:
+    """Decompile an inlined list comprehension starting at `pc`.
 
-    Used for module-level function annotations where the comprehension
-    loop runs directly inside the __annotate__ function.
-
-    Returns (ListComp, pc_after_cleanup).
+    Returns the comprehension and the index of the instruction after it.
     """
-    instructions = bc.instructions
-    # Skip preamble until FOR_ITER
-    while pc < len(instructions) and instructions[pc].opname != "FOR_ITER":
+    target, elt, filters, for_iter = _decompile_loop(bc, pc)
+    # Skip the cleanup, which restores the saved loop variable
+    pc = bc.target(bc.instructions[for_iter])
+    cleanup = {"END_FOR", "POP_ITER", "SWAP", "STORE_FAST"}
+    while bc.instructions[pc].opname in cleanup:
         pc += 1
-
-    for_iter = instructions[pc]
-    assert for_iter.opname == "FOR_ITER"
-    pc += 1
-
-    var_name, has_load, pc = _get_comp_loop_var(instructions, pc)
-    body, filters = _decompile_comp_body(bc, pc, var_name, has_load)
-
-    # Skip cleanup: END_FOR, POP_ITER, SWAP, STORE_FAST
-    pc = bc.target(for_iter)
-    _cleanup = {"END_FOR", "POP_ITER", "SWAP", "STORE_FAST"}
-    while pc < len(instructions) and instructions[pc].opname in _cleanup:
-        pc += 1
-
-    return _build_listcomp(body, filters, var_name, iterable), pc
+    generators = [ast.comprehension(target, iterable, filters, is_async=0)]
+    return ast.ListComp(elt=elt, generators=generators), pc
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +591,8 @@ def _decompile_bytecode(
     code: types.CodeType,
     conditional: collections.abc.Container[int] | None = None,
 ) -> dict[str, ast.expr]:
-    """Walk __annotate__ bytecode and return {name: ast_expr}.
+    """Run an __annotate__ or evaluate_* function's bytecode, returning
+    {name: annotation} or {_VALUE_KEY: value}.
 
     `conditional` is the value of ``__conditional_annotations__``: the
     indices of the conditionally defined annotations that were executed.
@@ -751,25 +676,22 @@ def _run(
             pc = bc.target(instr)
 
         elif op == "RETURN_VALUE":
-            if stack and stack[-1] is not _MAP:
-                result[_VALUE_KEY] = stack.pop()
+            value = stack.pop()
+            if value is not _MAP:
+                result[_VALUE_KEY] = value
             return
 
         else:
             pc += 1
             if op == "BUILD_MAP":
-                n = argval
-                if n == 0:
-                    stack.append(_MAP)
-                else:
-                    items = stack[-n * 2 :]
-                    del stack[-n * 2 :]
-                    for i in range(0, len(items), 2):
-                        key_node = items[i]
-                        val_node = items[i + 1]
-                        assert isinstance(key_node, ast.Constant)
-                        assert isinstance(key_node.value, str)
-                        result[key_node.value] = val_node
+                items = _pop_n(stack, 2 * argval)
+                for key_node, val_node in zip(
+                    items[::2], items[1::2], strict=True
+                ):
+                    assert isinstance(key_node, ast.Constant)
+                    assert isinstance(key_node.value, str)
+                    result[key_node.value] = val_node
+                stack.append(_MAP)
 
             elif op == "COPY":
                 stack.append(stack[-argval])
@@ -1045,52 +967,46 @@ def _merge_values(
             ctx=ast.Load(),
         )
 
-    if not _same_span(true_val, false_val):
+    if (
+        type(true_val) is not type(false_val)
+        or isinstance(true_val, ast.IfExp)
+        or not _same_span(true_val, false_val)
+    ):
         return make(true_val, false_val)
 
-    # Same span — shared structure.  Recurse into matching node types.
+    # Same span: shared structure, so merge the children.
+    fields: dict[str, Any] = {}
+    for name, t in ast.iter_fields(true_val):
+        f = getattr(false_val, name)
+        if isinstance(t, ast.expr):
+            fields[name] = _merge_values(t, f, make)
+        elif _is_expr_list(t) and _is_expr_list(f) and len(t) == len(f):
+            fields[name] = [
+                _merge_values(te, fe, make) for te, fe in zip(t, f, strict=True)
+            ]
+        elif _equal(t, f):
+            fields[name] = t
+        else:
+            return make(true_val, false_val)
+    return ast.copy_location(type(true_val)(**fields), true_val)
 
-    if isinstance(true_val, ast.Subscript) and isinstance(
-        false_val, ast.Subscript
-    ):
-        return ast.Subscript(
-            value=_merge_values(true_val.value, false_val.value, make),
-            slice=_merge_values(true_val.slice, false_val.slice, make),
-            ctx=ast.Load(),
+
+def _is_expr_list(value: object) -> TypeIs[list[ast.expr]]:
+    return isinstance(value, list) and all(
+        isinstance(v, ast.expr) for v in value
+    )
+
+
+def _equal(a: object, b: object) -> bool:
+    if isinstance(a, list):
+        return (
+            isinstance(b, list)
+            and len(a) == len(b)
+            and all(map(_equal, a, b, strict=True))
         )
-
-    if (
-        isinstance(true_val, ast.Tuple)
-        and isinstance(false_val, ast.Tuple)
-        and len(true_val.elts) == len(false_val.elts)
-    ):
-        elts = [
-            _merge_values(t, f, make)
-            for t, f in zip(true_val.elts, false_val.elts, strict=True)
-        ]
-        return ast.Tuple(elts=elts, ctx=ast.Load())
-
-    if (
-        isinstance(true_val, ast.BinOp)
-        and isinstance(false_val, ast.BinOp)
-        and type(true_val.op) is type(false_val.op)
-    ):
-        left = _merge_values(true_val.left, false_val.left, make)
-        right = _merge_values(true_val.right, false_val.right, make)
-        return ast.BinOp(left=left, op=true_val.op, right=right)
-
-    if (
-        isinstance(true_val, ast.Attribute)
-        and isinstance(false_val, ast.Attribute)
-        and true_val.attr == false_val.attr
-    ):
-        return ast.Attribute(
-            value=_merge_values(true_val.value, false_val.value, make),
-            attr=true_val.attr,
-            ctx=ast.Load(),
-        )
-
-    return make(true_val, false_val)
+    if isinstance(a, ast.AST):
+        return isinstance(b, ast.AST) and ast.dump(a) == ast.dump(b)
+    return a == b
 
 
 def _merge_branch_results(
@@ -1101,24 +1017,18 @@ def _merge_branch_results(
 ) -> None:
     """Merge results from two tail-position if-expression branches, using
     `make` to make if-expressions."""
-    all_keys = list(true_branch.keys())
-    for k in false_branch:
-        if k not in true_branch:
-            all_keys.append(k)
-
-    for key in all_keys:
-        true_val = true_branch.get(key)
-        false_val = false_branch.get(key)
-
-        if true_val is not None and false_val is not None:
-            result[key] = _merge_values(true_val, false_val, make)
-        elif true_val is not None:
-            result[key] = true_val
-        elif false_val is not None:
-            result[key] = false_val
+    for key in {**true_branch, **false_branch}:
+        if key in true_branch and key in false_branch:
+            result[key] = _merge_values(
+                true_branch[key], false_branch[key], make
+            )
+        else:
+            result[key] = true_branch.get(key) or false_branch[key]
 
 
-#####
+# ---------------------------------------------------------------------------
+# Binding information
+# ---------------------------------------------------------------------------
 
 
 class _CellMapping(collections.abc.Mapping[str, Any]):
@@ -1148,7 +1058,26 @@ class _CellMapping(collections.abc.Mapping[str, Any]):
 
 
 @dataclasses.dataclass
+class BindingNamespace:
+    """How names in an annotate function are bound."""
+
+    class_name: str | None
+    """The enclosing class name, for name mangling purposes."""
+    global_names: tuple[str, ...]
+    """Names known to be declared global."""
+    mangled_names: tuple[str, ...] | None
+    """If not None, only these private names are mangled.
+
+    Mirrors ``ste_mangled_names`` in CPython's symtable, which is set for
+    scopes (like generic class type params) where only some ``__`` names
+    get mangled.  Names are stored unmangled.
+    """
+
+
+@dataclasses.dataclass
 class BindingEnvironment:
+    """The namespaces that names in an annotate function resolve in."""
+
     globals: dict[str, Any]
     closure: collections.abc.Mapping[str, Any]
     """Free variables, excluding __classdict__ and
@@ -1159,7 +1088,10 @@ class BindingEnvironment:
 
 @dataclasses.dataclass
 class AnnotateInfo:
-    metadata: BindingMetadata
+    """What is needed to resolve the names in a decompiled annotate
+    function."""
+
+    namespace: BindingNamespace
     env: BindingEnvironment
 
 
@@ -1231,26 +1163,6 @@ def _enclosing_class_name(fn: types.FunctionType) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass
-class BindingMetadata:
-    class_name: str | None
-    """The enclosing class name, for name mangling purposes."""
-    global_names: tuple[str, ...]
-    """Names known to be declared global."""
-    mangled_names: tuple[str, ...] | None
-    """If not None, only these private names are mangled.
-
-    Mirrors ``ste_mangled_names`` in CPython's symtable, which is set for
-    scopes (like generic class type params) where only some ``__`` names
-    get mangled.  Names are stored unmangled.
-    """
-
-
 def _get_cells(fn: types.FunctionType) -> dict[str, types.CellType]:
     return dict(zip(fn.__code__.co_freevars, fn.__closure__ or (), strict=True))
 
@@ -1287,6 +1199,11 @@ def _get_environment(fn: types.FunctionType) -> BindingEnvironment:
     )
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
 def decompile_annotate(
     fn: types.FunctionType,
     class_name: str | None = None,
@@ -1296,7 +1213,7 @@ def decompile_annotate(
     For an __annotate__ function, returns a dict mapping annotation names
     to ast.expr nodes.  For an evaluate_* function (type alias values,
     TypeVar bounds, etc.), returns the single ast.expr it evaluates.
-    Also returns the metadata and environment needed to resolve names
+    Also returns the namespace and environment needed to resolve names
     in them.
 
     The class used for name mangling is derived from ``fn``'s qualname,
@@ -1308,12 +1225,12 @@ def decompile_annotate(
     if class_name is None:
         class_name = _enclosing_class_name(fn)
     global_names, all_names = _collect_names(code)
-    metadata = BindingMetadata(
+    namespace = BindingNamespace(
         class_name=class_name,
         global_names=global_names,
         mangled_names=_find_mangled_names(all_names, class_name),
     )
-    info = AnnotateInfo(metadata=metadata, env=_get_environment(fn))
+    info = AnnotateInfo(namespace=namespace, env=_get_environment(fn))
     result = _decompile_bytecode(code, _get_conditional(fn))
     if _VALUE_KEY in result:
         return result[_VALUE_KEY], info
@@ -1321,7 +1238,7 @@ def decompile_annotate(
 
 
 def decompile_annotations(
-    obj: Union[types.FunctionType, type],
+    obj: types.FunctionType | type,
 ) -> dict[str, ast.expr]:
     """Decompile the __annotate__ method of a function or class into AST nodes.
 
