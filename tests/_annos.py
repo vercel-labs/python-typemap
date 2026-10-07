@@ -614,3 +614,23 @@ class CompNode[T]:
     def fn121(
         self,
     ) -> tuple[*[m for m in Iter[T] if IsAssignable[m.type, int]]]: ...
+
+
+# ---------------------------------------------------------------------------
+# Dict displays (not to be confused with the annotations dict)
+# ---------------------------------------------------------------------------
+
+
+def fn122(x: Annotated[int, {}]) -> Annotated[int, {"k": str, "v": int}]: ...
+
+
+def fn123[T]() -> Annotated[int, {"k": str if T else bytes}]: ...
+
+
+class DictAnnos[T]:
+    a: Annotated[int, {}]
+    b: Annotated[int, {"k": str}]
+    c: Annotated[int, {"k": str if T else bytes}]
+
+
+type DictAlias = Annotated[int, {"k": str}]

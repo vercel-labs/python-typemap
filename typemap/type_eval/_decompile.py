@@ -53,7 +53,6 @@ _CMP_OPS: dict[str, type[ast.cmpop]] = {
 
 # Stack sentinels (compared by identity)
 _CLASSDICT: ast.expr = ast.Name(id="__classdict__")
-_MAP: ast.expr = ast.Name(id="__map__")
 _CONDITIONAL: ast.expr = ast.Name(id="__conditional_annotations__")
 
 # Result keys for the bare value returned by an evaluate_* function, and
@@ -253,6 +252,11 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         else:
             raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
 
+    elif op == "BUILD_MAP":
+        items = _pop_n(stack, 2 * argval)
+        keys: list[ast.expr | None] = [*items[::2]]
+        stack.append(_set_pos(ast.Dict(keys=keys, values=items[1::2]), instr))
+
     elif op == "BUILD_TUPLE":
         elts = _pop_n(stack, argval)
         stack.append(_set_pos(ast.Tuple(elts=elts, ctx=ast.Load()), instr))
@@ -369,6 +373,9 @@ class _Code:
 
     instructions: list[dis.Instruction]
     offset_to_idx: dict[int, int]
+    is_annotate: bool = False
+    """Whether this is an __annotate__ function, which returns a dict of
+    annotations, rather than e.g. an evaluate_* function."""
     ipdom: list[int | None] = dataclasses.field(init=False)
     """The immediate post-dominator of each instruction: the first one that
     every path from it reaches (or None if paths exit separately)."""
@@ -597,7 +604,9 @@ def _decompile_bytecode(
     `conditional` is the value of ``__conditional_annotations__``: the
     indices of the conditionally defined annotations that were executed.
     """
-    bc = _Code(*_get_instructions(code))
+    bc = _Code(
+        *_get_instructions(code), is_annotate=code.co_name == "__annotate__"
+    )
 
     # Skip preamble up through RAISE_VARARGS
     start = 0
@@ -677,35 +686,43 @@ def _run(
 
         elif op == "RETURN_VALUE":
             value = stack.pop()
-            if value is not _MAP:
+            if not bc.is_annotate:
                 result[_VALUE_KEY] = value
+                return
+            if not isinstance(value, ast.Dict):
+                raise DecompileError("__annotate__ returned a non-dict")
+            for key_node, val_node in zip(
+                value.keys, value.values, strict=True
+            ):
+                if not (
+                    isinstance(key_node, ast.Constant)
+                    and isinstance(key_node.value, str)
+                ):
+                    raise DecompileError("Non-string annotation name")
+                result[key_node.value] = val_node
             return
 
         else:
             pc += 1
-            if op == "BUILD_MAP":
-                items = _pop_n(stack, 2 * argval)
-                for key_node, val_node in zip(
-                    items[::2], items[1::2], strict=True
-                ):
-                    assert isinstance(key_node, ast.Constant)
-                    assert isinstance(key_node.value, str)
-                    result[key_node.value] = val_node
-                stack.append(_MAP)
-
-            elif op == "COPY":
+            if op == "COPY":
                 stack.append(stack[-argval])
 
             elif op == "POP_TOP":
                 stack.pop()
 
             elif op == "STORE_SUBSCR":
+                # Adding a class annotation to the dict
                 key_node = stack.pop()
-                stack.pop()  # __map__ copy
+                old = stack.pop()
                 val_node = stack.pop()
-                assert isinstance(key_node, ast.Constant)
-                assert isinstance(key_node.value, str)
-                result[key_node.value] = val_node
+                if not isinstance(old, ast.Dict):
+                    raise DecompileError("STORE_SUBSCR into a non-dict")
+                # Copy rather than mutate the dict, since it may be shared
+                # with another branch's stack.
+                new = copy.copy(old)
+                new.keys = [*old.keys, key_node]
+                new.values = [*old.values, val_node]
+                stack[:] = [new if v is old else v for v in stack]
 
             elif op not in ("RESUME", "COPY_FREE_VARS"):
                 raise DecompileError(
