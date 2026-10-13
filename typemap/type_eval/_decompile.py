@@ -1,10 +1,12 @@
 """Decompile __annotate__ bytecode back into AST expression nodes.
 
-Python 3.14 (PEP 649) generates __annotate__ functions for functions and
-classes that construct annotation dicts from bytecode, and evaluate_*
-functions for type alias values, TypeVar bounds, etc.  This module runs the
-bytecode on a virtual stack of ast.expr nodes to reconstruct the source
-expressions.
+WARNING: Higher slop percentage here than I normally aim for.
+
+Python 3.14/3.15 (PEP 649) generates __annotate__ functions for
+functions and classes that construct annotation dicts from bytecode,
+and evaluate_* functions for type alias values, TypeVar bounds, etc.
+This module runs the bytecode on a virtual stack of ast.expr nodes to
+reconstruct the source expressions.
 
 Two dict-building patterns exist:
 
@@ -21,6 +23,7 @@ operators.  For an if-expression in tail position, the compiler duplicates
 the rest of the code into both branches, which then never meet.  Source
 positions distinguish the duplicated structure, which is factored out of the
 if-expression, from independent structure (see _merge_values).
+
 """
 
 from __future__ import annotations
@@ -358,7 +361,27 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
             cmp = _CMP_OPS[dis.cmp_op[arg >> 5]]()
         stack.append(ast.Compare(left=left, ops=[cmp], comparators=[right]))
 
-    elif op in ("NOT_TAKEN", "PUSH_NULL"):
+    elif op == "STORE_SUBSCR":
+        # Adding a class annotation to the dict
+        key_node = stack.pop()
+        old = stack.pop()
+        val_node = stack.pop()
+        if not isinstance(old, ast.Dict):
+            raise DecompileError("STORE_SUBSCR into a non-dict")
+        # Copy rather than mutate the dict, since it may be shared with
+        # another branch's stack.
+        new = copy.copy(old)
+        new.keys = [*old.keys, key_node]
+        new.values = [*old.values, val_node]
+        stack[:] = [new if v is old else v for v in stack]
+
+    elif op == "COPY":
+        stack.append(stack[-argval])
+
+    elif op == "POP_TOP":
+        stack.pop()
+
+    elif op in ("NOT_TAKEN", "PUSH_NULL", "RESUME", "COPY_FREE_VARS"):
         pass
 
     else:
@@ -428,31 +451,6 @@ _COND_JUMPS = frozenset(
 )
 
 
-def _exec_op(bc: _Code, pc: int, stack: list[ast.expr]) -> int | None:
-    """Execute the instruction at `pc` if it is an ordinary expression op.
-
-    Returns the index of the next instruction, or None if not handled.
-    """
-    instr = bc.instructions[pc]
-    if (target := _builtin_guard_at(bc, pc)) is not None:
-        # Follow the plain call path rather than the inlined builtin.
-        return target
-    if instr.opname == "GET_ITER" and len(stack) >= 2 and _code_of(stack[-2]):
-        # The iterable for a comprehension's code object, which CALL
-        # handles.  (Since 3.15, there is no GET_ITER here.)
-        return pc + 1
-    # An inlined comprehension starts with GET_ITER, or since 3.15 (which
-    # moves GET_ITER later), by saving the loop variable.
-    if instr.opname in ("GET_ITER", "LOAD_FAST_AND_CLEAR"):
-        iterable = stack.pop()
-        comp, pc = _decompile_inline_comp(bc, pc + 1, iterable)
-        stack.append(comp)
-        return pc
-    if _exec_stack_op(instr, stack):
-        return pc + 1
-    return None
-
-
 def _builtin_guard_at(bc: _Code, pc: int) -> int | None:
     """Match ``COPY 1; LOAD_COMMON_CONSTANT; IS_OP 0; POP_JUMP_IF_FALSE``.
 
@@ -472,6 +470,43 @@ def _builtin_guard_at(bc: _Code, pc: int) -> int | None:
 # ---------------------------------------------------------------------------
 # Comprehension decompilation
 # ---------------------------------------------------------------------------
+
+# A comprehension like ``[a for a in B if P]`` comes in two forms.
+#
+# Generator expressions, and list comprehensions in class scopes, are
+# compiled as their own code object, which is called with the iterable:
+#
+#     LOAD_CONST <code <listcomp>>  MAKE_FUNCTION
+#     LOAD B  GET_ITER  CALL 0        (3.15: no GET_ITER here)
+#
+# and whose code is
+#
+#     <preamble>                      BUILD_LIST 0 / RETURN_GENERATOR, etc.
+#   L1: FOR_ITER L3
+#     STORE_FAST a
+#     <body>
+#   L3: END_FOR  POP_ITER  RETURN_VALUE
+#
+# Other list comprehensions are inlined, saving and restoring the loop
+# variable around the loop:
+#
+#     LOAD B  GET_ITER                (3.15: GET_ITER is after the SWAPs)
+#     LOAD_FAST_AND_CLEAR a  SWAP 2  BUILD_LIST 0  SWAP 2
+#   L1: FOR_ITER L3
+#     STORE_FAST a
+#     <body>
+#   L3: END_FOR  POP_ITER  SWAP 2  STORE_FAST a
+#
+# The body is ordinary expression code that ends each path either by
+# producing the element, or by skipping it (for a filter):
+#
+#     LOAD P  TO_BOOL  POP_JUMP_IF_TRUE L2
+#     JUMP_BACKWARD L1                skip
+#   L2: LOAD a  LIST_APPEND n  JUMP_BACKWARD L1
+#
+# For a genexpr, YIELD_VALUE takes the place of LIST_APPEND.  The loop
+# variable is stored with STORE_DEREF if a nested scope captures it, and
+# STORE_FAST a; LOAD a may be fused into STORE_FAST_LOAD_FAST.
 
 
 def _decompile_loop(
@@ -672,8 +707,25 @@ def _run(
             result[_ELT_KEY] = _SKIP
             return
 
-        elif (new_pc := _exec_op(bc, pc, stack)) is not None:
-            pc = new_pc
+        elif (target := _builtin_guard_at(bc, pc)) is not None:
+            # Follow the plain call path rather than the inlined builtin.
+            pc = target
+
+        # HACK: The iterator detection seems a little too ad-hoc...
+        elif op == "GET_ITER" and len(stack) >= 2 and _code_of(stack[-2]):
+            # The iterable for a comprehension's code object, which CALL
+            # handles.  (Since 3.15, there is no GET_ITER here.)
+            pc += 1
+
+        elif op in ("GET_ITER", "LOAD_FAST_AND_CLEAR"):
+            # An inlined comprehension starts with GET_ITER, or since 3.15
+            # (which moves GET_ITER later), by saving the loop variable.
+            iterable = stack.pop()
+            comp, pc = _decompile_inline_comp(bc, pc + 1, iterable)
+            stack.append(comp)
+
+        elif _exec_stack_op(instr, stack):
+            pc += 1
 
         elif op in _COND_JUMPS:
             new_pc = _fork(bc, pc, stack, result, conditional, in_comp)
@@ -703,32 +755,9 @@ def _run(
             return
 
         else:
-            pc += 1
-            if op == "COPY":
-                stack.append(stack[-argval])
-
-            elif op == "POP_TOP":
-                stack.pop()
-
-            elif op == "STORE_SUBSCR":
-                # Adding a class annotation to the dict
-                key_node = stack.pop()
-                old = stack.pop()
-                val_node = stack.pop()
-                if not isinstance(old, ast.Dict):
-                    raise DecompileError("STORE_SUBSCR into a non-dict")
-                # Copy rather than mutate the dict, since it may be shared
-                # with another branch's stack.
-                new = copy.copy(old)
-                new.keys = [*old.keys, key_node]
-                new.values = [*old.values, val_node]
-                stack[:] = [new if v is old else v for v in stack]
-
-            elif op not in ("RESUME", "COPY_FREE_VARS"):
-                raise DecompileError(
-                    f"Unsupported opcode: {op} "
-                    f"(arg={instr.arg}, argval={argval!r})"
-                )
+            raise DecompileError(
+                f"Unsupported opcode: {op} (arg={instr.arg}, argval={argval!r})"
+            )
 
 
 def _fork(
