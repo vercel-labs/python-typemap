@@ -33,9 +33,10 @@ import collections.abc
 import copy
 import dataclasses
 import dis
+import inspect
 import math
 import types
-from typing import Any, Callable, TypeIs
+from typing import Any, Callable
 
 __all__ = (
     "AnnotateInfo",
@@ -53,6 +54,10 @@ _NB_SUBSCR = 26  # []
 
 # CALL_INTRINSIC_1 arg constants
 _INTRINSIC_LIST_TO_TUPLE = 6
+
+# SET_FUNCTION_ATTRIBUTE arg constants
+_FUNC_DEFAULTS = 1
+_FUNC_KWDEFAULTS = 2
 
 _CMP_OPS: dict[str, type[ast.cmpop]] = {
     "<": ast.Lt,
@@ -283,8 +288,10 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
         code = _code_of(top)
         if code and code.co_name in ("<listcomp>", "<genexpr>"):
             stack.append(top)
+        elif code and code.co_name == "<lambda>":
+            stack.append(_decompile_lambda(code))
         else:
-            stack.append(_set_pos(ast.Constant(value="<function>"), instr))
+            raise DecompileError("Unsupported MAKE_FUNCTION")
 
     elif op in ("LIST_EXTEND", "LIST_APPEND"):
         item = stack.pop()
@@ -316,6 +323,24 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
             _set_pos(ast.Call(func=func, args=args, keywords=[]), instr)
         )
 
+    elif op == "CALL_KW":
+        names = stack.pop()
+        assert isinstance(names, ast.Tuple)
+        args = _pop_n(stack, argval)
+        nargs = len(args) - len(names.elts)
+        keywords = []
+        for name, value in zip(names.elts, args[nargs:], strict=True):
+            assert isinstance(name, ast.Constant)
+            assert isinstance(name.value, str)
+            keywords.append(ast.keyword(arg=name.value, value=value))
+        func = stack.pop()
+        stack.append(
+            _set_pos(
+                ast.Call(func=func, args=args[:nargs], keywords=keywords),
+                instr,
+            )
+        )
+
     elif op == "LOAD_COMMON_CONSTANT" and (
         argval is None or isinstance(argval, (bool, int, float, str))
     ):
@@ -331,11 +356,28 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
             raise DecompileError(f"Unsupported CALL_INTRINSIC_1 arg {arg}")
 
     elif op == "SET_FUNCTION_ATTRIBUTE":
-        # Closure / defaults attached to a function we already processed
-        # via MAKE_FUNCTION.  TOS is the function, TOS1 is the attribute
-        # value (e.g. closure tuple).  Pop TOS1, leave TOS in place.
         func_node = stack.pop()
-        stack.pop()  # discard the attribute value (closure tuple, etc.)
+        value = stack.pop()
+        if argval == _FUNC_DEFAULTS:
+            assert isinstance(func_node, ast.Lambda)
+            assert isinstance(value, ast.Tuple)
+            func_node = copy.copy(func_node)
+            func_node.args = copy.copy(func_node.args)
+            func_node.args.defaults = value.elts
+        elif argval == _FUNC_KWDEFAULTS:
+            assert isinstance(func_node, ast.Lambda)
+            assert isinstance(value, ast.Dict)
+            defaults = {
+                key.value: val
+                for key, val in zip(value.keys, value.values, strict=True)
+                if isinstance(key, ast.Constant)
+            }
+            func_node = copy.copy(func_node)
+            func_node.args = copy.copy(func_node.args)
+            func_node.args.kw_defaults = [
+                defaults.get(arg.arg) for arg in func_node.args.kwonlyargs
+            ]
+        # Otherwise it is the closure, which we don't need.
         stack.append(func_node)
 
     elif op == "UNPACK_SEQUENCE":
@@ -390,7 +432,13 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
     elif op == "POP_TOP":
         stack.pop()
 
-    elif op in ("NOT_TAKEN", "PUSH_NULL", "RESUME", "COPY_FREE_VARS"):
+    elif op in (
+        "NOT_TAKEN",
+        "PUSH_NULL",
+        "RESUME",
+        "COPY_FREE_VARS",
+        "MAKE_CELL",
+    ):
         pass
 
     else:
@@ -594,6 +642,34 @@ def _filter_condition(expr: ast.expr) -> ast.expr | bool:
     if isinstance(orelse, bool):
         return _or(_negate(test), body) if orelse else _and(test, body)
     return ast.IfExp(test=test, body=body, orelse=orelse)
+
+
+def _decompile_lambda(code: types.CodeType) -> ast.Lambda:
+    names = code.co_varnames
+    posonly = code.co_posonlyargcount
+    nargs = code.co_argcount
+    nkwonly = code.co_kwonlyargcount
+    i = nargs + nkwonly
+    vararg = kwarg = None
+    if code.co_flags & inspect.CO_VARARGS:
+        vararg = ast.arg(arg=names[i])
+        i += 1
+    if code.co_flags & inspect.CO_VARKEYWORDS:
+        kwarg = ast.arg(arg=names[i])
+    args = ast.arguments(
+        posonlyargs=[ast.arg(arg=name) for name in names[:posonly]],
+        args=[ast.arg(arg=name) for name in names[posonly:nargs]],
+        vararg=vararg,
+        kwonlyargs=[
+            ast.arg(arg=name) for name in names[nargs : nargs + nkwonly]
+        ],
+        kw_defaults=[None] * nkwonly,
+        kwarg=kwarg,
+        defaults=[],
+    )
+    result: dict[str, ast.expr] = {}
+    _run(_Code(*_get_instructions(code)), 0, [], result, None)
+    return ast.Lambda(args=args, body=result[_VALUE_KEY])
 
 
 def _decompile_comp_code(
@@ -907,12 +983,14 @@ def _simplify(expr: ast.expr) -> ast.expr:
             return new
 
         options = _orientations(node)
-        # `a or b` and `a and b` as values
-        for test, body, orelse in options:
-            if same(test, body):
-                return _or(simp(test), simp(orelse))
-            if same(test, orelse):
-                return _and(simp(test), simp(body))
+        # `a or b` and `a and b` as values (but not a comprehension
+        # filter, where one branch skips the element)
+        if not any(n is _SKIP for n in ast.walk(node)):
+            for test, body, orelse in options:
+                if same(test, body):
+                    return _or(simp(test), simp(orelse))
+                if same(test, orelse):
+                    return _and(simp(test), simp(body))
         # `x if a and b else y`
         for test, body, orelse in options:
             if isinstance(body, ast.IfExp):
@@ -1030,26 +1108,46 @@ def _merge_values(
         return make(true_val, false_val)
 
     # Same span: shared structure, so merge the children.
+    merged = _merge_children(true_val, false_val, make)
+    return make(true_val, false_val) if merged is None else merged
+
+
+def _merge_children[N: ast.AST](
+    true_node: N,
+    false_node: N,
+    make: Callable[[ast.expr, ast.expr], ast.expr],
+) -> N | None:
+    """Merge the fields of two nodes of the same type, or return None if
+    they differ somewhere that an if-expression can't go."""
     fields: dict[str, Any] = {}
-    for name, t in ast.iter_fields(true_val):
-        f = getattr(false_val, name)
-        if isinstance(t, ast.expr):
-            fields[name] = _merge_values(t, f, make)
-        elif _is_expr_list(t) and _is_expr_list(f) and len(t) == len(f):
-            fields[name] = [
-                _merge_values(te, fe, make) for te, fe in zip(t, f, strict=True)
+    for name, t in ast.iter_fields(true_node):
+        f = getattr(false_node, name)
+        if isinstance(t, list) and isinstance(f, list) and len(t) == len(f):
+            items = [
+                _merge_child(te, fe, make) for te, fe in zip(t, f, strict=True)
             ]
-        elif _equal(t, f):
-            fields[name] = t
+            if None in items:
+                return None
+            fields[name] = items
         else:
-            return make(true_val, false_val)
-    return ast.copy_location(type(true_val)(**fields), true_val)
+            fields[name] = _merge_child(t, f, make)
+            if fields[name] is None and t is not None:
+                return None
+    return ast.copy_location(type(true_node)(**fields), true_node)
 
 
-def _is_expr_list(value: object) -> TypeIs[list[ast.expr]]:
-    return isinstance(value, list) and all(
-        isinstance(v, ast.expr) for v in value
-    )
+def _merge_child(
+    t: Any, f: Any, make: Callable[[ast.expr, ast.expr], ast.expr]
+) -> Any:
+    if _equal(t, f):
+        return t
+    if isinstance(t, ast.expr) and isinstance(f, ast.expr):
+        return _merge_values(t, f, make)
+    # Something like an ast.keyword, which can't be made an if-expression,
+    # but might contain one.
+    if isinstance(t, ast.AST) and type(t) is type(f):
+        return _merge_children(t, f, make)
+    return None
 
 
 def _equal(a: object, b: object) -> bool:

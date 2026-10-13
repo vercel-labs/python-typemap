@@ -38,7 +38,7 @@ from typing import (
     runtime_checkable,
 )
 
-from typemap.typing import IsAssignable, Iter, Member
+from typemap.typing import GenericCallable, IsAssignable, Iter, Member
 
 
 # ---------------------------------------------------------------------------
@@ -643,3 +643,60 @@ type DictAlias = Annotated[int, {"k": str}]
 FLAG = True
 mod_x: list[int]
 mod_y: dict[str, int if FLAG else str]
+
+
+# ---------------------------------------------------------------------------
+# Lambdas
+# ---------------------------------------------------------------------------
+
+
+def fn124[T]() -> GenericCallable[tuple[T], lambda T: Callable[[T], T]]: ...
+
+
+def fn125() -> Annotated[int, lambda a, /, b=int, *c, d, e=str, **f: a]: ...
+
+
+def fn126() -> Annotated[int, lambda a: lambda b: a[b]]: ...
+
+
+def fn127() -> Annotated[int, lambda a: [x for x in a if x]]: ...
+
+
+class LambdaAnnos[T]:
+    a: GenericCallable[tuple[T], lambda T: Callable[[T], T]]
+
+
+type LambdaAlias[T] = GenericCallable[tuple[T], lambda T: Callable[[T], T]]
+
+
+# ---------------------------------------------------------------------------
+# Comprehension filters that are also the element
+# ---------------------------------------------------------------------------
+
+
+def fn128[T]() -> tuple[*[x for x in Iter[T] if x]]: ...
+
+
+def fn129[T]() -> tuple[*[x for x in Iter[T] if not x]]: ...
+
+
+# ---------------------------------------------------------------------------
+# Keyword arguments
+# ---------------------------------------------------------------------------
+
+
+def fn130() -> Annotated[int, len(str, key=int)]: ...
+
+
+def fn131() -> Annotated[int, len(key=lambda: [1], other=str)]: ...
+
+
+def fn132[T]() -> Annotated[int, len(key=int if T else str)]: ...
+
+
+class KeywordAnnos[T]:
+    a: Annotated[int, len(str, key=int)]
+    b: Annotated[int, len(key=int if T else str)]
+
+
+type KeywordAlias[T] = Annotated[int, len(key=int if T else str)]

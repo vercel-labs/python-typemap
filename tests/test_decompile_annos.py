@@ -203,12 +203,7 @@ _CASES = _collect_all_cases()
 _ALIAS_CASES = _collect_all_alias_cases()
 
 # Known failures — listed explicitly so new breakages aren't silently hidden.
-_KNOWN_XFAILS: frozenset[str] = frozenset(
-    {
-        # lambda in Annotated — not decompilable
-        "_annos::fn57.return",
-    }
-)
+_KNOWN_XFAILS: frozenset[str] = frozenset()
 
 # Equivalent decompilations that differ from the source, with and/or/not
 # rearranged, keyed like _KNOWN_XFAILS.
@@ -353,7 +348,7 @@ def main(paths: list[pathlib.Path] | None = None) -> None:
         got_dump = ast.dump(decompiled[key])
         if _matches(f"{label}.{key}", decompiled[key], expected_ast):
             passed += 1
-        elif "<function>" in got_dump:
+        elif f"{label}.{key}" in _KNOWN_XFAILS:
             xfailed += 1
         else:
             errors.append(
