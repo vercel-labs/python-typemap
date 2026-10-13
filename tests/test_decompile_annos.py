@@ -203,12 +203,57 @@ _KNOWN_XFAILS: frozenset[str] = frozenset(
     {
         # lambda in Annotated — not decompilable
         "_annos::fn57.return",
-        # equivalent, but with and/or/not rearranged
-        "test_eval_call_with_types::GetCallableMember",
-        "test_nplike::MergeOne",
-        "test_ziplike::Zip",
     }
 )
+
+# Equivalent decompilations that differ from the source, with and/or/not
+# rearranged, keyed like _KNOWN_XFAILS.
+_ALTERNATES: dict[str, str] = {
+    "test_eval_call_with_types::GetCallableMember": """
+        GetArg[
+            tuple[
+                *[
+                    m.type
+                    for m in Iter[Members[T]]
+                    if not (
+                        not IsAssignable[m.type, Callable]
+                        and (not IsAssignable[m.type, GenericCallable])
+                        or not IsAssignable[m.name, N]
+                    )
+                ],
+            ],
+            tuple,
+            Literal[0],
+        ]
+    """,
+    "test_nplike::MergeOne": """
+        (
+            S
+            if typing.IsEquivalent[T, Literal[1]]
+            else typing.RaiseError[Literal["Broadcast mismatch"], T, S]
+        )
+        if not typing.IsEquivalent[T, S]
+        and (not typing.IsEquivalent[S, Literal[1]])
+        else T
+    """,
+    "test_ziplike::Zip": """
+        tuple[()]
+        if typing.Bool[Empty[T]] and typing.Bool[Empty[S]]
+        else tuple[*Zip[DropLast[T], DropLast[S]], tuple[Last[T], Last[S]]]
+        if not typing.Bool[Empty[T]] and (not typing.Bool[Empty[S]])
+        else typing.RaiseError[Literal["Zip length mismatch"], T, S]
+    """,
+}
+
+
+def _matches(test_id: str, got: ast.expr, expected: ast.expr) -> bool:
+    got_dump = ast.dump(got)
+    if got_dump == ast.dump(expected):
+        return True
+    alternate = _ALTERNATES.get(test_id)
+    return alternate is not None and got_dump == ast.dump(
+        parse_annotation(f"({alternate})")
+    )
 
 
 def _case_id(case: Case) -> str:
@@ -237,14 +282,14 @@ def test_decompile_annotation(case: Case) -> None:
     except SyntaxError:
         pytest.skip(f"string form is not parseable: {expected_str!r}")
 
-    expected_dump = ast.dump(expected_ast)
-
     decompiled = decompile_annotations(obj)
     assert key in decompiled, f"{label}.{key}: missing from decompiled output"
 
-    got_dump = ast.dump(decompiled[key])
-    assert got_dump == expected_dump, (
-        f"{label}.{key}:\n  expected: {expected_dump}\n  got:      {got_dump}"
+    got = decompiled[key]
+    assert _matches(test_id, got, expected_ast), (
+        f"{label}.{key}:\n"
+        f"  expected: {ast.dump(expected_ast)}\n"
+        f"  got:      {ast.dump(got)}"
     )
 
 
@@ -256,10 +301,11 @@ def test_decompile_type_alias(case: AliasCase) -> None:
     if label in _KNOWN_XFAILS:
         pytest.xfail(f"known failure: {label}")
 
-    expected_dump = ast.dump(expected)
-    got_dump = ast.dump(_decompile_alias(alias))
-    assert got_dump == expected_dump, (
-        f"{label}:\n  expected: {expected_dump}\n  got:      {got_dump}"
+    got = _decompile_alias(alias)
+    assert _matches(label, got, expected), (
+        f"{label}:\n"
+        f"  expected: {ast.dump(expected)}\n"
+        f"  got:      {ast.dump(got)}"
     )
 
 
@@ -301,7 +347,7 @@ def main(paths: list[pathlib.Path] | None = None) -> None:
             continue
 
         got_dump = ast.dump(decompiled[key])
-        if got_dump == expected_dump:
+        if _matches(f"{label}.{key}", decompiled[key], expected_ast):
             passed += 1
         elif "<function>" in got_dump:
             xfailed += 1
@@ -316,12 +362,13 @@ def main(paths: list[pathlib.Path] | None = None) -> None:
     for label, alias, expected in _collect_all_alias_cases(paths):
         expected_dump = ast.dump(expected)
         try:
-            got_dump = ast.dump(_decompile_alias(alias))
+            got = _decompile_alias(alias)
         except DecompileError as exc:
             errors.append(f"{label}: DecompileError: {exc}")
             failed += 1
             continue
-        if got_dump == expected_dump:
+        got_dump = ast.dump(got)
+        if _matches(label, got, expected):
             passed += 1
         else:
             errors.append(
