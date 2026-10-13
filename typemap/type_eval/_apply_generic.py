@@ -1,4 +1,5 @@
 import annotationlib
+import collections
 import dataclasses
 import inspect
 import sys
@@ -234,6 +235,13 @@ def _maybe_get_annotate(obj: object, key: str) -> types.FunctionType | None:
     return af
 
 
+def _shadow_closure(
+    env: annotations.BindingEnvironment, names: Mapping[str, object]
+) -> annotations.BindingEnvironment:
+    closure = collections.ChainMap(dict(names), env.closure)  # type: ignore[arg-type]
+    return dataclasses.replace(env, closure=closure)
+
+
 def get_annotations(
     obj: object,
     args: Mapping[str, object],
@@ -243,34 +251,24 @@ def get_annotations(
 ) -> Any | None:
     """Get the annotations on an object, substituting in type vars."""
 
-    locals = None
     rr = None
-    globs = {}
+    env = annotations.BindingEnvironment(globals={}, closure={}, classdict=None)
     if af := _maybe_get_annotate(obj, key):
-        # TODO: class_name??
         ast, info = annotations.get_annotate_ast(af)
-
-        # TODO: _type_ast should deal with all of these things
         env = info.env
-        globs = env.globals
-        locals = dict(env.classdict) if env.classdict else {}
-        locals.update(env.closure)
-        locals.update(args)
-
         rr = _type_ast.annotations_ast_to_types(
-            ast, globals=globs, locals=locals
+            ast, env=_shadow_closure(env, args), namespace=info.namespace
         )
     elif annos_ok and (rr := getattr(obj, "__annotations__", None)):
         if mod := sys.modules.get(obj.__module__):
-            globs.update(vars(mod))
+            env.globals.update(vars(mod))
 
         # Make a copy in case we need to eval the annotations. We don't want to
         # modify the original.
         rr = dict(rr)
 
     if isinstance(rr, dict) and any(isinstance(v, str) for v in rr.values()):
-        if not locals:
-            locals = dict(args)
+        locals = dict(args)
         # Copy in any __type_params__ that aren't provided for, so that if
         # we have to eval, we have them.
         if params := getattr(obj, "__type_params__", None):
@@ -287,16 +285,17 @@ def get_annotations(
             if rcls.__name__ not in args:
                 locals[rcls.__name__] = rcls
 
+        str_env = _shadow_closure(env, locals)
         for k, v in rr.items():
             # Eval strings
             if isinstance(v, str):
-                v = _type_ast.annotations_ast_to_types(v, globs, locals)
+                v = _type_ast.annotations_ast_to_types(v, env=str_env)
                 # Handle cases where annotation is explicitly a string,
                 # e.g.:
                 #   class Foo[X]:
                 #       x: "Foo[X | None]"
                 if isinstance(v, str):
-                    v = _type_ast.annotations_ast_to_types(v, globs, locals)
+                    v = _type_ast.annotations_ast_to_types(v, env=str_env)
             rr[k] = v
 
     return rr

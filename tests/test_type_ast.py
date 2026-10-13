@@ -9,6 +9,11 @@ from typing import Literal, TypeVar
 
 import pytest
 
+from typemap.annotations import (
+    BindingEnvironment,
+    BindingNamespace,
+    get_annotate_ast,
+)
 from typemap.type_eval import eval_typing, type_ast_to_type
 from typemap.typing import _Cond, _GetAssociated
 
@@ -201,3 +206,123 @@ def test_type_ast_namespace_01():
     )
     ns["Y"] = str
     assert res() == (int, str)
+
+
+def _class_env(**classdict):
+    return BindingEnvironment(
+        globals={**globals(), "X": str, "Ts": tuple[int]},
+        closure={},
+        classdict=classdict,
+    )
+
+
+def test_type_ast_class_scope_01():
+    env = _class_env(X=int, Ts=tuple[bool])
+    assert type_ast_to_type("list[X]", env=env) == list[int]
+
+    # Lambda bodies can't see the class namespace, but defaults can
+    assert type_ast_to_type("(lambda: X)", env=env)() is str
+    assert type_ast_to_type("(lambda x=X: x)", env=env)() is int
+
+    # Only the outermost iterable of a comprehension can see it
+    src = "tuple[*[tuple[t, X] for t in Iter[Ts]]]"
+    assert (
+        eval_typing(type_ast_to_type(src, env=env)) == tuple[tuple[bool, str]]
+    )
+
+
+def test_type_ast_class_scope_02():
+    # Names declared global bypass the class namespace
+    env = _class_env(X=int)
+    ns = BindingNamespace(
+        class_name="C", global_names=("X",), mangled_names=None
+    )
+    assert type_ast_to_type("X", env=env, namespace=ns) is str
+
+
+def test_type_ast_class_scope_03():
+    # any and all are syntax, even if the class has its own
+    env = _class_env(any=None, Ts=tuple[str, bool])
+    src = "int if any(IsAssignable[t, int] for t in Iter[Ts]) else str"
+    assert eval_typing(type_ast_to_type(src, env=env)) is int
+
+
+class Mangled:
+    _C__y = bool
+
+
+def test_type_ast_mangling_01():
+    ns = BindingNamespace(class_name="_C", global_names=(), mangled_names=None)
+    env = BindingEnvironment(
+        globals={"_C__X": int, "Mangled": Mangled}, closure={}, classdict=None
+    )
+    assert type_ast_to_type("list[__X]", env=env, namespace=ns) == list[int]
+    assert type_ast_to_type("Mangled.__y", env=env, namespace=ns) is bool
+    assert (
+        type_ast_to_type("(lambda __x: __x)(__X)", env=env, namespace=ns) is int
+    )
+    assert (
+        type_ast_to_type("__X__", globals={"__X__": str}, namespace=ns) is str
+    )
+
+    # Like for the bounds of a generic class's type params, where only
+    # some names are mangled
+    ns = BindingNamespace(
+        class_name="C", global_names=(), mangled_names=("__X",)
+    )
+    env = BindingEnvironment(
+        globals={"_C__X": int, "__Y": str}, closure={}, classdict=None
+    )
+    assert (
+        type_ast_to_type("tuple[__X, __Y]", env=env, namespace=ns)
+        == tuple[int, str]
+    )
+
+
+_SCOPING_SRC = """
+X = int
+
+class C:
+    X = str
+    __Y = bool
+    a: X
+    b: lambda: X
+    c: lambda x=X: x
+    d: __Y
+
+g = "global"
+
+def outer():
+    g = "nonlocal"
+    class D:
+        global g
+        ann: g
+    D.g = "class"
+    return D
+
+D = outer()
+"""
+
+
+def test_type_ast_decompiled_scoping_01():
+    # Evaluating decompiled annotations matches evaluating them for real.
+    # (dont_inherit, so as not to get this file's __future__ import.)
+    ns: dict = {}
+    exec(compile(_SCOPING_SRC, "<scoping>", "exec", dont_inherit=True), ns)
+
+    def conv(cls):
+        annos, info = get_annotate_ast(cls.__annotate__)
+        assert isinstance(annos, dict)
+        return {
+            k: type_ast_to_type(v, env=info.env, namespace=info.namespace)
+            for k, v in annos.items()
+        }
+
+    res = conv(ns["C"])
+    real = ns["C"].__annotations__
+    assert res["a"] is real["a"] is str
+    assert res["b"]() is real["b"]() is int
+    assert res["c"]() is real["c"]() is str
+    assert res["d"] is real["d"] is bool
+
+    assert conv(ns["D"]) == ns["D"].__annotations__ == {"ann": "global"}
