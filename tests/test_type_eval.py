@@ -1566,6 +1566,78 @@ def test_eval_iter_02():
     assert d == tuple[int, str, int, str]
 
 
+type OptTuple[T] = tuple[*[X | None for X in Iter[T]]]
+type IntsOnly[T] = tuple[*[X for X in Iter[T] if IsAssignable[X, int]]]
+type Pair[T] = tuple[T, T]
+type Pairs[T] = tuple[*[Unpack[Pair[X]] for X in Iter[T]]]
+type AnyInt[T] = (
+    Literal[True]
+    if any(IsAssignable[X, int] for X in Iter[T])
+    else Literal[False]
+)
+type AllInt[T] = (
+    Literal[True]
+    if all(IsAssignable[X, int] for X in Iter[T])
+    else Literal[False]
+)
+
+
+def test_eval_iter_unbounded_01():
+    d = eval_typing(OptTuple[tuple[int, str]])
+    assert d == tuple[int | None, str | None]
+
+    d = eval_typing(OptTuple[tuple[int, ...]])
+    assert d == tuple[int | None, ...]
+
+    d = eval_typing(OptTuple[tuple[int, *tuple[str, ...], bool]])
+    assert d == tuple[int | None, Unpack[tuple[str | None, ...]], bool | None]
+
+
+def test_eval_iter_unbounded_02():
+    assert eval_typing(IntsOnly[tuple[str, ...]]) == tuple[()]
+    assert (
+        eval_typing(IntsOnly[tuple[str, *tuple[int, ...]]]) == tuple[int, ...]
+    )
+    assert (
+        eval_typing(IntsOnly[tuple[int, *tuple[str, ...], bool]])
+        == tuple[int, bool]
+    )
+
+
+def test_eval_iter_unbounded_03():
+    assert eval_typing(Pairs[tuple[int, str]]) == tuple[int, int, str, str]
+    with pytest.raises(TypeError, match="exactly one type"):
+        eval_typing(Pairs[tuple[int, ...]])
+
+
+def test_eval_iter_unbounded_any_all_01():
+    # Unbounded parts are assumed to be non-empty
+    t, f = Literal[True], Literal[False]
+    assert eval_typing(AnyInt[tuple[int, ...]]) == t
+    assert eval_typing(AnyInt[tuple[str, ...]]) == f
+    assert eval_typing(AnyInt[tuple[str, *tuple[int, ...]]]) == t
+    assert eval_typing(AllInt[tuple[int, ...]]) == t
+    assert eval_typing(AllInt[tuple[str, ...]]) == f
+    assert eval_typing(AllInt[tuple[int, *tuple[str, ...], bool]]) == f
+    assert eval_typing(AllInt[tuple[int, *tuple[bool, ...], bool]]) == t
+
+
+def test_eval_iter_unbounded_04():
+    # Unbounded parts aren't flattened into the enclosing tuple
+    assert (
+        eval_typing(tuple[int, *tuple[str, ...], bool])
+        == tuple[int, Unpack[tuple[str, ...]], bool]
+    )
+    assert eval_typing(tuple[*tuple[int, ...]]) == tuple[int, ...]
+    assert eval_typing(Length[tuple[int, *tuple[str, ...]]]) == Literal[None]
+
+
+def test_eval_iter_any_01():
+    # XXX: Is this what we want?
+    with pytest.raises(TypeError, match="Any is not a tuple"):
+        eval_typing(OptTuple[Any])
+
+
 type NotLiteralGeneric[T] = not T
 type AndLiteralGeneric[L, R] = L and R
 type OrLiteralGeneric[L, R] = L or R

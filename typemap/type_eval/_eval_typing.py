@@ -22,6 +22,7 @@ if typing.TYPE_CHECKING:
     from typing import Any, Sequence
 
 from . import _apply_generic
+from . import _typing_inspect
 
 
 __all__ = ("eval_typing",)
@@ -329,7 +330,9 @@ def _eval_args(args: Sequence[Any], ctx: EvalContext) -> tuple[Any]:
     evaled = []
     for arg in args:
         ev = _eval_types(arg, ctx)
-        if isinstance(ev, typing_UnpackGenericAlias):
+        if isinstance(
+            ev, typing_UnpackGenericAlias
+        ) and not _typing_inspect.is_unbounded_tuple_unpack(ev):
             if (args := ev.__typing_unpacked_tuple_args__) is not None:
                 evaled.extend(args)
             else:
@@ -357,6 +360,13 @@ def _eval_applied_type_alias(obj: types.GenericAlias, ctx: EvalContext):
         return typing.Unpack[_eval_types(stripped, ctx)]
 
     new_args = _eval_args(obj.__args__, ctx)
+    if (
+        obj.__origin__ is tuple
+        and len(new_args) == 1
+        and _typing_inspect.is_unbounded_tuple_unpack(new_args[0])
+    ):
+        # tuple[*tuple[X, ...]] is just tuple[X, ...]
+        new_args = new_args[0].__args__[0].__args__
 
     new_obj = _apply_type(obj.__origin__, new_args)
     if isinstance(obj.__origin__, type):
