@@ -1393,10 +1393,7 @@ def _eval_NewProtocol(*etyps: Member, ctx):
         if type_eval.issubtype(
             typing.Literal["ClassVar"], tquals
         ) and _is_method_like(typ):
-            try:
-                dct[name] = _callable_type_to_method(name, typ, ctx)
-            except type_eval.StuckException:
-                annos[name] = _add_quals(typ, tquals)
+            dct[name] = _callable_type_to_method(name, typ, ctx)
         else:
             annos[name] = _add_quals(typ, tquals)
             _unpack_init(dct, name, init)

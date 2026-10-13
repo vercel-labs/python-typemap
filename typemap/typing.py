@@ -1,6 +1,5 @@
 # mypy: ignore-errors
 
-import contextvars
 import enum
 import typing
 import types
@@ -357,81 +356,53 @@ class RaiseError[S: str, *Ts]:
 
 ##################################################################
 
-# TODO: type better
-special_form_evaluator: contextvars.ContextVar[
-    typing.Callable[[typing.Any], typing.Any] | None
-] = contextvars.ContextVar("special_form_evaluator", default=None)
+
+class Iter[T]:
+    pass
 
 
-class _IterGenericAlias(_GenericAlias, _root=True):
-    def __iter__(self):
-        evaluator = special_form_evaluator.get()
-        if evaluator:
-            return evaluator(self)
-        else:
-            return iter(())
+class IsAssignable[Lhs, Rhs]:
+    pass
 
 
-@_SpecialForm
-def Iter(self, tp):
-    return _IterGenericAlias(self, (tp,))
+class IsEquivalent[Lhs, Rhs]:
+    pass
 
 
-class _BoolGenericAlias(_GenericAlias, _root=True):
-    def __bool__(self):
-        evaluator = special_form_evaluator.get()
-        if evaluator:
-            result = evaluator(self)
-            # Unwrap _LiteralGeneric
-            return bool(result)
-        else:
-            return False
+class Bool[T]:
+    pass
 
 
-@_SpecialForm
-def IsAssignable(self, tps):
-    return _BoolGenericAlias(self, tps)
+class _Not[T]:
+    pass
 
 
-@_SpecialForm
-def IsEquivalent(self, tps):
-    return _BoolGenericAlias(self, tps)
+class _And[*Tps]:
+    pass
 
 
-@_SpecialForm
-def Bool(self, tp):
-    return _BoolGenericAlias(self, tp)
+class _Or[*Tps]:
+    pass
 
 
-@_SpecialForm
-def _Not(self, tp):
-    return _BoolGenericAlias(self, tp)
-
-
-@_SpecialForm
-def _And(self, tps):
-    return _BoolGenericAlias(self, tps)
-
-
-@_SpecialForm
-def _Or(self, tps):
-    return _BoolGenericAlias(self, tps)
-
-
-@_SpecialForm
-def _Any(self, tp):
+class _Any[T]:
     """_Any[_UnpackMap[...]]: Equivalent to ``any(...)``"""
-    if typing.get_origin(tp) is not _UnpackMap:
-        raise TypeError(f"_Any expected an _UnpackMap, got {tp!r}")
-    return _BoolGenericAlias(self, tp)
+
+    @classmethod
+    def __class_getitem__(cls, tp):
+        if typing.get_origin(tp) is not _UnpackMap:
+            raise TypeError(f"_Any expected an _UnpackMap, got {tp!r}")
+        return _GenericAlias(cls, (tp,))
 
 
-@_SpecialForm
-def _All(self, tp):
+class _All[T]:
     """_All[_UnpackMap[...]]: Equivalent to ``all(...)``"""
-    if typing.get_origin(tp) is not _UnpackMap:
-        raise TypeError(f"_All expected an _UnpackMap, got {tp!r}")
-    return _BoolGenericAlias(self, tp)
+
+    @classmethod
+    def __class_getitem__(cls, tp):
+        if typing.get_origin(tp) is not _UnpackMap:
+            raise TypeError(f"_All expected an _UnpackMap, got {tp!r}")
+        return _GenericAlias(cls, (tp,))
 
 
 class _Cond[B, T, F]:

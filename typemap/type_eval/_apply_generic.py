@@ -1,5 +1,4 @@
 import annotationlib
-import contextlib
 import dataclasses
 import inspect
 import sys
@@ -7,7 +6,9 @@ import types
 import typing
 
 
+from .. import annotations
 from . import _eval_typing
+from . import _type_ast
 from . import _typing_inspect
 
 
@@ -95,7 +96,7 @@ def substitute(ty, args):
 
     # Lean on typing's own substitution machinery, which knows how to
     # handle Callable, Annotated, etc., by wrapping ty in a tuple.
-    wrapped: Any = tuple[ty]
+    wrapped = tuple[ty]
     params = wrapped.__parameters__
     if not any(p in args for p in params):
         return ty
@@ -217,15 +218,20 @@ def make_func(
 EXCLUDED_ATTRIBUTES = typing.EXCLUDED_ATTRIBUTES - {'__init__'}  # type: ignore[attr-defined]
 
 
-@contextlib.contextmanager
-def _make_typevar_getattr_stuck():
-    """Catch AttributeError on typing.TypeVar and turn it into StuckError."""
+def _maybe_get_annotate(obj: object, key: str) -> types.FunctionType | None:
+    af = typing.cast(types.FunctionType, getattr(obj, key, None))
+    if not af:
+        return None
     try:
-        yield
-    except AttributeError as e:
-        if str(e).startswith("'typing.TypeVar'"):
-            raise _eval_typing.StuckException
-        raise
+        af(annotationlib.Format.VALUE_WITH_FAKE_GLOBALS)
+    except NotImplementedError:
+        return None
+    except ValueError as e:
+        if 'VALUE_WITH_FAKE_GLOBALS' in str(e):
+            return None
+    except Exception:
+        pass
+    return af
 
 
 def get_annotations(
@@ -237,24 +243,24 @@ def get_annotations(
 ) -> Any | None:
     """Get the annotations on an object, substituting in type vars."""
 
+    locals = None
     rr = None
-    globs = None
-    if af := typing.cast(types.FunctionType, getattr(obj, key, None)):
-        # Substitute in names that are provided but keep the existing
-        # values for everything else.
-        closure = tuple(
-            types.CellType(args[name]) if name in args else orig_value
-            for name, orig_value in zip(
-                af.__code__.co_freevars, af.__closure__ or (), strict=True
-            )
-        )
+    globs = {}
+    if af := _maybe_get_annotate(obj, key):
+        # TODO: class_name??
+        ast, info = annotations.get_annotate_ast(af)
 
-        globs = af.__globals__
-        ff = types.FunctionType(af.__code__, globs, af.__name__, None, closure)
-        with _make_typevar_getattr_stuck():
-            rr = ff(annotationlib.Format.VALUE)
+        # TODO: _type_ast should deal with all of these things
+        env = info.env
+        globs = env.globals
+        locals = dict(env.classdict) if env.classdict else {}
+        locals.update(env.closure)
+        locals.update(args)
+
+        rr = _type_ast.annotations_ast_to_types(
+            ast, globals=globs, locals=locals
+        )
     elif annos_ok and (rr := getattr(obj, "__annotations__", None)):
-        globs = {}
         if mod := sys.modules.get(obj.__module__):
             globs.update(vars(mod))
 
@@ -263,13 +269,14 @@ def get_annotations(
         rr = dict(rr)
 
     if isinstance(rr, dict) and any(isinstance(v, str) for v in rr.values()):
-        args = dict(args)
+        if not locals:
+            locals = dict(args)
         # Copy in any __type_params__ that aren't provided for, so that if
         # we have to eval, we have them.
         if params := getattr(obj, "__type_params__", None):
             for param in params:
                 if str(param) not in args:
-                    args[str(param)] = param
+                    locals[str(param)] = param
 
         # Include the class itself in args so that self-referential string
         # annotations (e.g. from `from __future__ import annotations`) in
@@ -278,20 +285,18 @@ def get_annotations(
         rcls = cls or obj
         if isinstance(rcls, (type, typing.TypeAliasType)):
             if rcls.__name__ not in args:
-                args[rcls.__name__] = rcls
+                locals[rcls.__name__] = rcls
 
         for k, v in rr.items():
             # Eval strings
             if isinstance(v, str):
-                with _make_typevar_getattr_stuck():
-                    v = eval(v, globs, args)
+                v = _type_ast.annotations_ast_to_types(v, globs, locals)
                 # Handle cases where annotation is explicitly a string,
                 # e.g.:
                 #   class Foo[X]:
                 #       x: "Foo[X | None]"
                 if isinstance(v, str):
-                    with _make_typevar_getattr_stuck():
-                        v = eval(v, globs, args)
+                    v = _type_ast.annotations_ast_to_types(v, globs, locals)
             rr[k] = v
 
     return rr
@@ -300,22 +305,12 @@ def get_annotations(
 def _resolved_function_signature(func, args):
     """Get the signature of a function with type hints resolved to arg values"""
 
-    import typemap.typing as nt
-
     # We need to grab the signature and don't care about annotations,
     # since we will be replacing those immediately.
-    # We use format=FORWARDREF to swallow all problems, and we disable
-    # the special_form_evaluator on top of that mostly for performance.
-    #
-    # (Before we added dot notation for Member, disabling the
-    # special_form_evaluator was sufficient.)
-    token = nt.special_form_evaluator.set(None)
-    try:
-        sig = inspect.signature(
-            func, annotation_format=annotationlib.Format.FORWARDREF
-        )
-    finally:
-        nt.special_form_evaluator.reset(token)
+    # We use format=FORWARDREF to swallow all problems.
+    sig = inspect.signature(
+        func, annotation_format=annotationlib.Format.FORWARDREF
+    )
 
     if hints := get_annotations(func, args):
         params = []
@@ -360,13 +355,9 @@ def get_local_defns(
             # __annotations__ on methods broke stuff and I didn't want
             # to chase it down yet.
             stuck = False
-            try:
-                rr = get_annotations(
-                    stuff, boxed.str_args, cls=boxed.cls, annos_ok=False
-                )
-            except _eval_typing.StuckException:
-                stuck = True
-                rr = None
+            rr = get_annotations(
+                stuff, boxed.str_args, cls=boxed.cls, annos_ok=False
+            )
 
             if rr is not None:
                 local_fn = make_func(orig, rr)

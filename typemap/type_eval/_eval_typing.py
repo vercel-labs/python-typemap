@@ -27,12 +27,6 @@ from . import _apply_generic
 __all__ = ("eval_typing",)
 
 
-class StuckException(Exception):
-    """Raised when a type operator receives a type variable argument."""
-
-    pass
-
-
 _eval_funcs: dict[type, typing.Callable[..., Any]] = {}
 # Evaluators that receive their arguments unevaluated
 _lazy_eval_funcs: set[type] = set()
@@ -130,24 +124,18 @@ _current_context: contextvars.ContextVar[EvalContext | None] = (
 
 @contextlib.contextmanager
 def _ensure_context() -> typing.Iterator[EvalContext]:
-    import typemap.typing as nt
-
     ctx = _current_context.get()
     ctx_set = False
     if ctx is None:
         ctx = EvalContext()
         _current_context.set(ctx)
         ctx_set = True
-    evaluator_token = nt.special_form_evaluator.set(
-        lambda t: _eval_types(t, _current_context.get())  # type: ignore[arg-type]
-    )
 
     try:
         yield ctx
     finally:
         if ctx_set:
             _current_context.set(None)
-        nt.special_form_evaluator.reset(evaluator_token)
 
 
 def _get_current_context() -> EvalContext:
@@ -437,13 +425,6 @@ def _eval_applied_class(obj: typing_GenericAlias, ctx: EvalContext):
     new_args = _eval_args(typing.get_args(obj), ctx)
 
     if func := _eval_funcs.get(obj.__origin__):
-        _tvars = (
-            typing.TypeVar,
-            typing.ParamSpec,
-            typing.TypeVarTuple,
-        )
-        if any(isinstance(a, _tvars) for a in new_args):
-            raise StuckException(obj)
         ret = func(*new_args, ctx=ctx)
         # return _eval_types(ret, ctx)  # ???
         return ret

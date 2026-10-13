@@ -6,6 +6,7 @@ import typing
 from typing import Literal, Never, TypeVar, TypedDict, Union, ReadOnly
 
 from typemap.type_eval import eval_typing, _ensure_context
+from typemap.typing import _Cond
 from typemap_extensions import (
     Attrs,
     FromUnion,
@@ -328,15 +329,20 @@ def test_type_dir_10():
 
     assert format_helper.format_class(d) == textwrap.dedent("""\
         class Lurr:
-            foo: typing.ClassVar[typemap.typing.GenericCallable[tuple[T], <...>]]
+            def foo[T](x: T) -> typemap.typing._Cond[typemap.typing.IsAssignable[T, str], int, list[int]]: ...
     """)
 
     member = _get_member(eval_typing(Members[Lurr]), "foo")
 
     fn = member.__args__[1].__args__[1]
     with _ensure_context():
-        assert fn(str).__args__[1] is int
-        assert fn(bool).__args__[1] == list[int]
+        assert (
+            fn(str).__args__[1] == _Cond[IsAssignable[str, str], int, list[int]]
+        )
+        assert (
+            fn(bool).__args__[1]
+            == _Cond[IsAssignable[bool, str], int, list[int]]
+        )
 
 
 def test_type_dir_get_arg_1():
@@ -470,7 +476,7 @@ def test_type_dir_dot_projection_1():
     d = eval_typing(AnnoyingProjection)
 
     assert format_helper.format_class(d) == textwrap.dedent("""\
-         class AnnoyingProjection:
-             foo: typing.ClassVar[typemap.typing.GenericCallable[tuple[T], <...>]]
-             bar: typing.ClassVar[typemap.typing.GenericCallable[tuple[T], <...>]]
+        class AnnoyingProjection:
+            def foo[T](self: Self, a: T) -> typemap.typing._GetAssociated[T, typing.Literal['name']]: ...
+            def bar[T](self: Self, a: T) -> typemap.typing._GetAssociated[T, typing.Literal['name']]: ...
     """)
