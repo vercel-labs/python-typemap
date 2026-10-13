@@ -16,12 +16,14 @@ No type evaluation is performed.
 """
 
 import ast
+import builtins
 import collections
 import copy
 import typing
 
-from typing import Any, Mapping
+from typing import Any, Callable, Collection, Mapping
 
+from typemap.annotations import BindingEnvironment, BindingNamespace
 from typemap.typing import (
     _Cond,
     _GetAssociated,
@@ -92,6 +94,113 @@ def _subscript(name: str, *args: ast.expr) -> ast.expr:
         else ast.Tuple(elts=list(args), ctx=ast.Load()),
         ctx=ast.Load(),
     )
+
+
+def _any_all_op(node: ast.Call) -> str | None:
+    """The type operator for an any() or all() of a generator, if it is one."""
+    if (
+        isinstance(node.func, ast.Name)
+        and node.func.id in ("any", "all")
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.GeneratorExp)
+    ):
+        return "Any" if node.func.id == "any" else "All"
+    return None
+
+
+class _Mangler(ast.NodeTransformer):
+    """Mangle private names, for annotations taken from source."""
+
+    def __init__(self, namespace: BindingNamespace) -> None:
+        self.namespace = namespace
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        node.id = self.namespace.mangle(node.id)
+        return node
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.Attribute:
+        self.generic_visit(node)
+        node.attr = self.namespace.mangle(node.attr)
+        return node
+
+    def visit_arg(self, node: ast.arg) -> ast.arg:
+        node.arg = self.namespace.mangle(node.arg)
+        return node
+
+
+_CLASS_LOOKUP = "__typemap_class_lookup"
+
+
+class _ClassScoper(ast.NodeTransformer):
+    """Make names see the class namespace like in a class's annotation scope.
+
+    Names are looked up in the class namespace first, unless they are
+    declared global.  Lambda bodies and all but the outermost iterable
+    of comprehensions are nested scopes, which can't see it.
+    """
+
+    def __init__(self, global_names: Collection[str]) -> None:
+        self.global_names = global_names
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if not isinstance(node.ctx, ast.Load) or node.id in self.global_names:
+            return node
+        return ast.Call(
+            func=ast.Name(id=_CLASS_LOOKUP, ctx=ast.Load()),
+            args=[ast.Constant(value=node.id)],
+            keywords=[],
+        )
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.Lambda:
+        args = node.args
+        args.defaults = [self.visit(d) for d in args.defaults]
+        args.kw_defaults = [
+            None if d is None else self.visit(d) for d in args.kw_defaults
+        ]
+        return node
+
+    def _comprehension[
+        C: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
+    ](self, node: C) -> C:
+        gen = node.generators[0]
+        gen.iter = self.visit(gen.iter)
+        return node
+
+    visit_ListComp = _comprehension
+    visit_SetComp = _comprehension
+    visit_DictComp = _comprehension
+    visit_GeneratorExp = _comprehension
+
+    def visit_Call(self, node: ast.Call) -> ast.Call:
+        # The rewriter treats these as syntax, so leave any and all alone
+        if _any_all_op(node):
+            node.args = [self.visit(node.args[0])]
+            return node
+        self.generic_visit(node)
+        return node
+
+
+def _class_lookup(
+    classdict: Mapping[str, Any], scope: Mapping[str, Any]
+) -> Callable[[str], Any]:
+    def lookup(name: str) -> Any:
+        try:
+            return classdict[name]
+        except KeyError:
+            pass
+        try:
+            return scope[name]
+        except KeyError:
+            pass
+        try:
+            return getattr(builtins, name)
+        except AttributeError:
+            raise NameError(
+                f"name {name!r} is not defined", name=name
+            ) from None
+
+    return lookup
 
 
 class _Rewriter(ast.NodeTransformer):
@@ -186,15 +295,9 @@ class _Rewriter(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id in ("any", "all")
-            and len(node.args) == 1
-            and not node.keywords
-            and isinstance(node.args[0], ast.GeneratorExp)
-        ):
+        if op := _any_all_op(node):
             gen = node.args[0]
-            op = "Any" if node.func.id == "any" else "All"
+            assert isinstance(gen, ast.GeneratorExp)
             return _subscript(op, self._comprehension(gen.elt, gen.generators))
         return self.generic_visit(node)
 
@@ -231,37 +334,74 @@ def _rewrite_star_unpack(expr: ast.expr) -> ast.expr:
 
 def type_ast_to_type(
     node: str | ast.expr | ast.Expression,
-    globals: dict[str, Any],
-    locals: dict[str, Any] | None = None,
+    globals: dict[str, Any] | None = None,
+    locals: Mapping[str, Any] | None = None,
+    *,
+    env: BindingEnvironment | None = None,
+    namespace: BindingNamespace | None = None,
 ) -> Any:
     """Convert the AST of a type annotation into ``typing`` objects.
 
     The PEP 827 syntax (conditional types, unpacked comprehensions,
     type booleans and member access) is rewritten into type operators,
     but nothing is evaluated.
+
+    Names resolve in *locals*, then *globals*.  An *env* can be given
+    instead of both, in which case names resolve in its closure, then
+    its globals, and its class namespace, if any, is visible the way it
+    is in an annotation scope in a class body.
+
+    A *namespace* says how names are bound where the annotation was
+    written: its ``global`` declarations bypass the class namespace,
+    and private names are mangled.  (Mangling only matters for
+    annotations from source, since decompiled ones are already mangled.)
     """
+    if env is None:
+        env = BindingEnvironment(
+            globals={} if globals is None else globals,
+            closure={} if locals is None else locals,
+            classdict=None,
+        )
+    elif globals is not None or locals is not None:
+        raise TypeError("globals and locals can't be given with env")
+
     if isinstance(node, str):
         node = ast.parse(node, mode="eval")
 
     if isinstance(node, ast.Expression):
         node = node.body
 
+    # NodeTransformers modify the tree in place
+    tree = copy.deepcopy(node)
+    if namespace is not None:
+        tree = _Mangler(namespace).visit(tree)
+    if env.classdict is not None:
+        global_names = namespace.global_names if namespace else ()
+        tree = _ClassScoper(global_names).visit(tree)
+
     rewriter = _Rewriter()
     rewritten = ast.fix_missing_locations(
-        # NodeTransformer modifies the tree in place
-        ast.Expression(
-            body=_rewrite_star_unpack(rewriter.visit(copy.deepcopy(node)))
-        )
+        ast.Expression(body=_rewrite_star_unpack(rewriter.visit(tree)))
     )
     code = compile(rewritten, "<type>", "eval")
+
+    scope = collections.ChainMap(env.closure, env.globals)  # type: ignore[arg-type]
+    helpers = _HELPERS
+    if env.classdict is not None:
+        helpers = {
+            **_HELPERS,
+            _CLASS_LOOKUP: _class_lookup(env.classdict, scope),
+        }
 
     # Lambdas (like in GenericCallable) created by eval can't see a
     # separate locals dict, so everything needs to go in globals. The
     # fallback lets that be done without copying globals.
-    env = collections.ChainMap(
-        _HELPERS, rewriter.typevars, locals or {}, globals
+    return eval(
+        code,
+        _GlobalsWithFallback(
+            {}, collections.ChainMap(helpers, rewriter.typevars, scope)
+        ),
     )
-    return eval(code, _GlobalsWithFallback({}, env))
 
 
 def annotations_ast_to_types(
@@ -269,11 +409,17 @@ def annotations_ast_to_types(
     | ast.expr
     | ast.Expression
     | Mapping[str, str | ast.expr | ast.Expression],
-    globals: dict[str, Any],
-    locals: dict[str, Any] | None = None,
+    globals: dict[str, Any] | None = None,
+    locals: Mapping[str, Any] | None = None,
+    *,
+    env: BindingEnvironment | None = None,
+    namespace: BindingNamespace | None = None,
 ) -> Any:
     if isinstance(node, Mapping):
         return {
-            k: type_ast_to_type(v, globals, locals) for k, v in node.items()
+            k: type_ast_to_type(
+                v, globals, locals, env=env, namespace=namespace
+            )
+            for k, v in node.items()
         }
-    return type_ast_to_type(node, globals, locals)
+    return type_ast_to_type(node, globals, locals, env=env, namespace=namespace)

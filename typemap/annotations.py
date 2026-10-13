@@ -1226,6 +1226,17 @@ class BindingNamespace:
     get mangled.  Names are stored unmangled.
     """
 
+    def mangle(self, name: str) -> str:
+        """Mangle *name* the way the compiler would in this scope."""
+        if self.class_name is None or not _is_private_name(name):
+            return name
+        if self.mangled_names is not None and name not in self.mangled_names:
+            return name
+        class_name = self.class_name.lstrip("_")
+        if not class_name:
+            return name
+        return f"_{class_name}{name}"
+
 
 @dataclasses.dataclass
 class BindingEnvironment:
@@ -1258,17 +1269,20 @@ def _collect_names(
 
     In a class-scoped annotate function, ordinary names are loaded with
     LOAD_FROM_DICT_OR_GLOBALS, so LOAD_GLOBAL indicates a ``global``
-    declaration.
+    declaration.  Nested scopes (lambdas and comprehensions) can't see
+    the class namespace, so they use LOAD_GLOBAL regardless, and only
+    contribute to all names.
     """
     global_names: dict[str, None] = {}
     all_names: dict[str, None] = {}
 
-    def visit(code: types.CodeType) -> None:
+    def visit(code: types.CodeType, nested: bool) -> None:
         for instr in dis.get_instructions(code):
             if instr.opcode not in _NAME_OPS:
                 continue
             if (
-                instr.opname == "LOAD_GLOBAL"
+                not nested
+                and instr.opname == "LOAD_GLOBAL"
                 and instr.argval != "__conditional_annotations__"
             ):
                 global_names[instr.argval] = None
@@ -1277,9 +1291,9 @@ def _collect_names(
                 all_names[name] = None
         for const in code.co_consts:
             if isinstance(const, types.CodeType):
-                visit(const)
+                visit(const, True)
 
-    visit(code)
+    visit(code, False)
     return tuple(global_names), tuple(all_names)
 
 
