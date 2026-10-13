@@ -700,3 +700,94 @@ class KeywordAnnos[T]:
 
 
 type KeywordAlias[T] = Annotated[int, len(key=int if T else str)]
+
+
+# ---------------------------------------------------------------------------
+# Consecutive loads of locals (fused into LOAD_FAST_LOAD_FAST and
+# LOAD_FAST_BORROW_LOAD_FAST_BORROW)
+# ---------------------------------------------------------------------------
+
+
+def fn133[T]() -> tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]: ...
+
+
+def fn134[T]() -> tuple[*[x for x in Iter[T] if IsAssignable[x, x]]]: ...
+
+
+def fn135() -> Annotated[int, lambda a, b: a[b]]: ...
+
+
+def fn136() -> Annotated[int, lambda a: (len(x, x) for x in a)]: ...
+
+
+def fn137() -> Annotated[int, lambda a, b: len(a, b, [a for a in b])]: ...
+
+
+class FusedLoads[T]:
+    a: tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]
+
+    def fn138(self) -> tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]: ...
+
+
+type FusedLoadsAlias[T] = tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]
+
+
+# ---------------------------------------------------------------------------
+# Arithmetic and bitwise operators
+# ---------------------------------------------------------------------------
+
+
+def fn139[A, B]() -> Annotated[int, A + B]: ...
+
+
+def fn140[A, B, C]() -> Annotated[
+    int, A - B * C @ A / B // C % A**B, (A - B) * C, A - (B - C)
+]: ...
+
+
+def fn141[A, B, C]() -> Annotated[int, A << B >> C & A ^ B | C]: ...
+
+
+def fn142[A, B, T]() -> Annotated[int, A + (B if T else A), int | A + B]: ...
+
+
+def fn143[T]() -> tuple[*[x + x for x in Iter[T]]]: ...
+
+
+class BinOps[A, B]:
+    a: Annotated[int, A + B]
+    b: Annotated[int, (A if B else int) * A]
+
+    def fn144(self) -> tuple[*[x + A for x in Iter[B]]]: ...
+
+
+type BinOpsAlias[A, B] = Annotated[int, A + B, A ^ B]
+
+
+# ---------------------------------------------------------------------------
+# Slices (BINARY_SLICE, BUILD_SLICE, and constant slices)
+# ---------------------------------------------------------------------------
+
+
+def fn145[A, B, C]() -> Annotated[int, C[A:B], C[:B], C[A:], C[A:B][B:A]]: ...
+
+
+def fn146[A, B, C]() -> Annotated[int, C[A:B:C], C[::C], C[A::]]: ...
+
+
+def fn147[A, B, C]() -> Annotated[int, C[A:B, C], C[:, A], C[A, ::B]]: ...
+
+
+def fn148[C]() -> Annotated[int, C[:], C[1:2], C[-1:], C[::-1], C[1:2, 3]]: ...
+
+
+def fn149[T]() -> tuple[*[x[1:] for x in Iter[T]]]: ...
+
+
+class Slices[A, B]:
+    a: Annotated[int, A[B:], A[B:A, ::B]]
+
+    def fn150(self) -> Annotated[int, B[A:A]]: ...
+
+
+type SlicesAlias[A, B] = Annotated[int, A[B:], A[:B:A], A[1:]]
