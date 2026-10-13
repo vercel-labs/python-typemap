@@ -622,16 +622,32 @@ def _builtin_guard_at(bc: _Code, pc: int) -> int | None:
 # For a genexpr, YIELD_VALUE takes the place of LIST_APPEND.  The loop
 # variable is stored with STORE_DEREF if a nested scope captures it, and
 # STORE_FAST a; LOAD a may be fused into STORE_FAST_LOAD_FAST.
+#
+# Each further ``for`` clause is a loop nested in the body, which goes
+# back to the outer loop when it finishes:
+#
+#     LOAD C  GET_ITER
+#   L4: FOR_ITER L5
+#     STORE_FAST c
+#     <body>
+#   L5: END_FOR  POP_ITER  JUMP_BACKWARD L1
+
+
+class _InnerLoop(ast.GeneratorExp):
+    """The element of a comprehension loop whose body is another loop, for
+    the following ``for`` clauses."""
 
 
 def _decompile_loop(
-    bc: _Code, pc: int
-) -> tuple[ast.Name, ast.expr, list[ast.expr], int]:
-    """Decompile a comprehension's loop, starting from somewhere before its
-    FOR_ITER.  Returns (target, element, filters, index of FOR_ITER).
+    bc: _Code, pc: int, iterable: ast.expr
+) -> tuple[ast.expr, list[ast.comprehension], int]:
+    """Decompile a comprehension's loop over `iterable`, starting from
+    somewhere before its FOR_ITER.  Returns (element, generators, index of
+    FOR_ITER).
 
     The body is run like any other code (see _run), except that it ends
-    either by appending an element or by skipping to the next iteration.
+    either by appending an element, by skipping to the next iteration, or
+    by starting a nested loop.
     """
     while bc.instructions[pc].opname != "FOR_ITER":
         pc += 1
@@ -674,7 +690,11 @@ def _decompile_loop(
         filters.append(cond)
         elt = kept[0]
     target = ast.Name(id=var_name, ctx=ast.Store())
-    return target, elt, filters, for_iter
+    generators = [ast.comprehension(target, iterable, filters, is_async=0)]
+    if isinstance(elt, _InnerLoop):
+        generators += elt.generators
+        elt = elt.elt
+    return elt, generators, for_iter
 
 
 def _ifexp_leaves(expr: ast.expr) -> list[ast.expr]:
@@ -739,10 +759,9 @@ def _decompile_comp_code(
     Used for generator expressions, and for list comprehensions in class
     scopes, which aren't inlined.
     """
-    target, elt, filters, _ = _decompile_loop(
-        _Code(*_get_instructions(code)), 0
+    elt, generators, _ = _decompile_loop(
+        _Code(*_get_instructions(code)), 0, iterable
     )
-    generators = [ast.comprehension(target, iterable, filters, is_async=0)]
     if code.co_name == "<genexpr>":
         return ast.GeneratorExp(elt=elt, generators=generators)
     return ast.ListComp(elt=elt, generators=generators)
@@ -757,13 +776,12 @@ def _decompile_inline_comp(
 
     Returns the comprehension and the index of the instruction after it.
     """
-    target, elt, filters, for_iter = _decompile_loop(bc, pc)
+    elt, generators, for_iter = _decompile_loop(bc, pc, iterable)
     # Skip the cleanup, which restores the saved loop variable
     pc = bc.target(bc.instructions[for_iter])
     cleanup = {"END_FOR", "POP_ITER", "SWAP", "STORE_FAST"}
     while bc.instructions[pc].opname in cleanup:
         pc += 1
-    generators = [ast.comprehension(target, iterable, filters, is_async=0)]
     return ast.ListComp(elt=elt, generators=generators), pc
 
 
@@ -848,6 +866,17 @@ def _run(
 
         elif in_comp and op == "JUMP_BACKWARD":
             result[_ELT_KEY] = _SKIP
+            return
+
+        elif (
+            in_comp
+            and op == "GET_ITER"
+            and bc.instructions[pc + 1].opname == "FOR_ITER"
+        ):
+            # Another `for` clause
+            iterable = stack.pop()
+            elt, generators, _ = _decompile_loop(bc, pc + 1, iterable)
+            result[_ELT_KEY] = _InnerLoop(elt=elt, generators=generators)
             return
 
         elif (target := _builtin_guard_at(bc, pc)) is not None:

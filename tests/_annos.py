@@ -791,3 +791,64 @@ class Slices[A, B]:
 
 
 type SlicesAlias[A, B] = Annotated[int, A[B:], A[:B:A], A[1:]]
+
+
+# ---------------------------------------------------------------------------
+# Comprehensions with multiple for clauses
+# ---------------------------------------------------------------------------
+
+
+def fn151[T]() -> tuple[*[x[y] for x in Iter[T] for y in x]]: ...
+
+
+def fn152[A]() -> tuple[
+    *[
+        dict[a, b]
+        for a in Iter[A]
+        if not IsAssignable[a, bool]
+        for b in Iter[tuple[a, None]]
+        if IsAssignable[a, int] and IsAssignable[b, None]
+    ]
+]: ...
+
+
+def fn153[T]() -> tuple[*[list[t] for t in Iter[T] for t in Iter[t]]]: ...
+
+
+def fn154[A, B, C]() -> tuple[
+    *[tuple[a, b, c] for a in Iter[A] for b in Iter[B] if b for c in Iter[C]]
+]: ...
+
+
+def fn155[T]() -> tuple[*[[y for y in x] for x in Iter[T] for z in x]]: ...
+
+
+def fn156[As, Bs]() -> Annotated[
+    int, any(IsAssignable[a, b] for a in Iter[As] for b in Iter[Bs])
+]: ...
+
+
+def fn157() -> Annotated[int, lambda a: [x[y] for x in a for y in x]]: ...
+
+
+class MultiFor[A, B]:
+    a: tuple[*[x[y] for x in Iter[A] for y in x]]
+    b: Annotated[
+        int,
+        all(
+            IsAssignable[a, b]
+            for a in Iter[A]
+            if IsAssignable[a, int]
+            for b in Iter[tuple[int, a]]
+        ),
+    ]
+
+    def fn158(self) -> tuple[*[x[y] for x in Iter[A] for y in x]]: ...
+
+
+type MultiForAlias[A, B] = tuple[
+    *[a for a in Iter[A] if IsAssignable[a, int] for b in Iter[tuple[a]]]
+]
+
+
+def fn159[T]() -> tuple[*[x + y for x in Iter[T] for y in x]]: ...
