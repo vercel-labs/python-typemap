@@ -164,7 +164,7 @@ def collect_annotated(
 
 
 def get_annotations_str(
-    obj: types.FunctionType | type,
+    obj: types.FunctionType | type | types.ModuleType,
 ) -> dict[str, str]:
     """Return the string-form annotations for *obj* (function or class)."""
     return annotationlib.get_annotations(

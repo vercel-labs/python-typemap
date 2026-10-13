@@ -29,8 +29,8 @@ from tests.dump_annos import (
 )
 from typemap.type_eval._decompile import (
     DecompileError,
-    decompile_annotate,
-    decompile_annotations,
+    get_annotate_ast,
+    get_annotations_ast,
 )
 
 TESTS_DIR = pathlib.Path(__file__).parent
@@ -95,7 +95,8 @@ def _import_path(path: pathlib.Path) -> types.ModuleType:
 # ---------------------------------------------------------------------------
 
 # (label, annotation_key, original_obj, stringified_obj)
-Case = tuple[str, str, types.FunctionType | type, types.FunctionType | type]
+AnnotatedObj = types.FunctionType | type | types.ModuleType
+Case = tuple[str, str, AnnotatedObj, AnnotatedObj]
 
 
 def _collect_cases_for(path: pathlib.Path) -> list[Case]:
@@ -115,6 +116,9 @@ def _collect_cases_for(path: pathlib.Path) -> list[Case]:
 
     stem = path.stem
     cases: list[Case] = []
+    if "__annotate__" in vars(orig_mod):
+        for key in get_annotations_str(string_mod):
+            cases.append((f"{stem}::<module>", key, orig_mod, string_mod))
     for qname, orig_obj in orig_map.items():
         string_obj: Any = string_mod
         for part in qname.split("."):
@@ -190,7 +194,7 @@ def _collect_all_alias_cases(
 
 
 def _decompile_alias(alias: typing.TypeAliasType) -> ast.expr:
-    value, _ = decompile_annotate(alias.evaluate_value)
+    value, _ = get_annotate_ast(alias.evaluate_value)
     assert isinstance(value, ast.expr)
     return value
 
@@ -282,7 +286,7 @@ def test_decompile_annotation(case: Case) -> None:
     except SyntaxError:
         pytest.skip(f"string form is not parseable: {expected_str!r}")
 
-    decompiled = decompile_annotations(obj)
+    decompiled = get_annotations_ast(obj)
     assert key in decompiled, f"{label}.{key}: missing from decompiled output"
 
     got = decompiled[key]
@@ -335,7 +339,7 @@ def main(paths: list[pathlib.Path] | None = None) -> None:
         expected_dump = ast.dump(expected_ast)
 
         try:
-            decompiled = decompile_annotations(obj)
+            decompiled = get_annotations_ast(obj)
         except DecompileError as exc:
             errors.append(f"{label}.{key}: DecompileError: {exc}")
             failed += 1

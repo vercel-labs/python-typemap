@@ -634,3 +634,12 @@ class DictAnnos[T]:
 
 
 type DictAlias = Annotated[int, {"k": str}]
+
+
+# ---------------------------------------------------------------------------
+# Module annotations
+# ---------------------------------------------------------------------------
+
+FLAG = True
+mod_x: list[int]
+mod_y: dict[str, int if FLAG else str]

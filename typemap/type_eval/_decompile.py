@@ -1250,7 +1250,7 @@ def _get_environment(fn: types.FunctionType) -> BindingEnvironment:
 # ---------------------------------------------------------------------------
 
 
-def decompile_annotate(
+def get_annotate_ast(
     fn: types.FunctionType,
     class_name: str | None = None,
 ) -> tuple[dict[str, ast.expr] | ast.expr, AnnotateInfo]:
@@ -1283,18 +1283,19 @@ def decompile_annotate(
     return result, info
 
 
-def decompile_annotations(
-    obj: types.FunctionType | type,
+def get_annotations_ast(
+    obj: types.FunctionType | type | types.ModuleType,
 ) -> dict[str, ast.expr]:
-    """Decompile the __annotate__ method of a function or class into AST nodes.
+    """Decompile the __annotate__ function of a function, class, or module
+    into AST nodes.
 
     Returns a dict mapping annotation names to ast.expr nodes.
     For functions, keys are parameter names and 'return'.
-    For classes, keys are attribute names.
+    For classes and modules, keys are attribute names.
     """
     annotate = getattr(obj, "__annotate__", None)
     if annotate is None:
         return {}
-    result, _ = decompile_annotate(annotate)
+    result, _ = get_annotate_ast(annotate)
     assert isinstance(result, dict)
     return result

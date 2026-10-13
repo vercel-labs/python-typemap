@@ -1,10 +1,19 @@
-"""Classes with conditionally defined annotations.
+"""Classes and a module with conditionally defined annotations.
 
 Their ``__annotate__`` bytecode checks ``__conditional_annotations__`` to
 decide which annotations were actually executed.
 """
 
 FLAG = True
+
+mod_a: int
+if FLAG:
+    mod_b: str
+else:
+    mod_c: bytes
+if not FLAG:
+    mod_d: float
+mod_e: list[int] if FLAG else None
 
 
 class IfElse:
