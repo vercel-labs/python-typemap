@@ -27,7 +27,7 @@ from tests.dump_annos import (
     load_stringified_copy,
     parse_annotation,
 )
-from typemap.type_eval._decompile import (
+from typemap.annotations import (
     DecompileError,
     get_annotate_ast,
     get_annotations_ast,

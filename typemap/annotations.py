@@ -37,6 +37,15 @@ import math
 import types
 from typing import Any, Callable, TypeIs
 
+__all__ = (
+    "AnnotateInfo",
+    "BindingEnvironment",
+    "BindingNamespace",
+    "DecompileError",
+    "get_annotate_ast",
+    "get_annotations_ast",
+)
+
 
 # BINARY_OP arg constants (from dis._nb_ops)
 _NB_OR = 7  # |
