@@ -48,9 +48,24 @@ __all__ = (
 )
 
 
-# BINARY_OP arg constants (from dis._nb_ops)
-_NB_OR = 7  # |
+# BINARY_OP arg constants (from dis._nb_ops).  The in-place ones (13-25)
+# are left out, since they only come from statements.
 _NB_SUBSCR = 26  # []
+_BIN_OPS: dict[int, type[ast.operator]] = {
+    0: ast.Add,  # +
+    1: ast.BitAnd,  # &
+    2: ast.FloorDiv,  # //
+    3: ast.LShift,  # <<
+    4: ast.MatMult,  # @
+    5: ast.Mult,  # *
+    6: ast.Mod,  # %
+    7: ast.BitOr,  # |
+    8: ast.Pow,  # **
+    9: ast.RShift,  # >>
+    10: ast.Sub,  # -
+    11: ast.Div,  # /
+    12: ast.BitXor,  # ^
+}
 
 # CALL_INTRINSIC_1 arg constants
 _INTRINSIC_LIST_TO_TUPLE = 6
@@ -93,6 +108,12 @@ def _const_to_ast(value: Any) -> ast.expr:
     """
     if isinstance(value, tuple):
         return ast.Tuple(elts=[_const_to_ast(v) for v in value], ctx=ast.Load())
+    if isinstance(value, slice):
+        return _slice(
+            _const_to_ast(value.start),
+            _const_to_ast(value.stop),
+            _const_to_ast(value.step),
+        )
     if (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -100,6 +121,19 @@ def _const_to_ast(value: Any) -> ast.expr:
     ):
         return ast.UnaryOp(op=ast.USub(), operand=ast.Constant(value=-value))
     return ast.Constant(value=value)
+
+
+def _slice(
+    lower: ast.expr, upper: ast.expr, step: ast.expr | None = None
+) -> ast.Slice:
+    """Make a slice, with omitted parts (compiled as None) left out."""
+
+    def part(node: ast.expr | None) -> ast.expr | None:
+        if isinstance(node, ast.Constant) and node.value is None:
+            return None
+        return node
+
+    return ast.Slice(lower=part(lower), upper=part(upper), step=part(step))
 
 
 def _set_pos(node: ast.expr, instr: dis.Instruction) -> ast.expr:
@@ -225,6 +259,12 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
     elif op in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FAST", "LOAD_FAST_BORROW"):
         stack.append(_set_pos(ast.Name(id=argval, ctx=ast.Load()), instr))
 
+    elif op in ("LOAD_FAST_LOAD_FAST", "LOAD_FAST_BORROW_LOAD_FAST_BORROW"):
+        # The fused instruction only has the first load's position.
+        first, second = argval
+        stack.append(_set_pos(ast.Name(id=first, ctx=ast.Load()), instr))
+        stack.append(ast.Name(id=second, ctx=ast.Load()))
+
     elif op == "LOAD_DEREF":
         if argval == "__classdict__":
             stack.append(_CLASSDICT)
@@ -257,17 +297,35 @@ def _exec_stack_op(instr: dis.Instruction, stack: list[ast.expr]) -> bool:
                     instr,
                 )
             )
-        elif arg == _NB_OR:
+        elif arg in _BIN_OPS:
             right = stack.pop()
             left = stack.pop()
             stack.append(
                 _set_pos(
-                    ast.BinOp(left=left, op=ast.BitOr(), right=right),
+                    ast.BinOp(left=left, op=_BIN_OPS[arg](), right=right),
                     instr,
                 )
             )
         else:
             raise DecompileError(f"Unsupported BINARY_OP arg {arg}")
+
+    elif op == "BINARY_SLICE":
+        upper = stack.pop()
+        lower = stack.pop()
+        value_node = stack.pop()
+        stack.append(
+            _set_pos(
+                ast.Subscript(
+                    value=value_node,
+                    slice=_slice(lower, upper),
+                    ctx=ast.Load(),
+                ),
+                instr,
+            )
+        )
+
+    elif op == "BUILD_SLICE":
+        stack.append(_set_pos(_slice(*_pop_n(stack, argval)), instr))
 
     elif op == "BUILD_MAP":
         items = _pop_n(stack, 2 * argval)
