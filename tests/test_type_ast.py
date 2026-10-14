@@ -94,9 +94,9 @@ def test_type_ast_comprehension_02():
         _eval(src, As=tuple[int, bool, str, float])
         == tuple[
             dict[int, int],
-            dict[int, NoneType],
-            dict[str, NoneType],
-            dict[float, NoneType],
+            dict[int, None],
+            dict[str, None],
+            dict[float, None],
         ]
     )
 
