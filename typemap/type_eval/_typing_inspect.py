@@ -93,6 +93,23 @@ def is_type_var_or_tuple_unpack(t: Any) -> bool:
     return is_type_var(t) or is_type_var_tuple_unpack(t)
 
 
+def is_unbounded_tuple(t: Any) -> bool:
+    """Whether t is tuple[X, ...]."""
+    if not (is_generic_alias(t) and get_origin(t) is tuple):
+        return False
+    args = get_args(t)
+    return len(args) == 2 and args[1] is Ellipsis
+
+
+def is_unbounded_tuple_unpack(t: Any) -> bool:
+    """Whether t is Unpack[tuple[X, ...]]."""
+    return (
+        is_generic_alias(t)
+        and get_origin(t) is Unpack
+        and is_unbounded_tuple(get_args(t)[0])
+    )
+
+
 def is_generic_type_alias(t: Any) -> TypeGuard[GenericAlias]:
     return is_generic_alias(t) and isinstance(get_origin(t), TypeAliasType)
 

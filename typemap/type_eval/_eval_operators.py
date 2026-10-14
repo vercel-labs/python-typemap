@@ -448,21 +448,28 @@ def _lift_over_unions(func):
 @type_eval.register_evaluator(Iter)
 @_lift_evaluated
 def _eval_Iter(tp, *, ctx):
+    # The unbounded part of a tuple is produced as Unpack[tuple[X, ...]]
     tp = _eval_types(tp, ctx)
-    if (
-        _typing_inspect.is_generic_alias(tp)
-        and tp.__origin__ is tuple
-        and (not tp.__args__ or tp.__args__[-1] is not Ellipsis)
-    ):
+    if _typing_inspect.is_unbounded_tuple(tp):
+        return iter((typing.Unpack[tp],))
+    elif _typing_inspect.is_generic_alias(tp) and tp.__origin__ is tuple:
         return iter(tp.__args__)
     else:
         # XXX: Or should we return []?
         # We *definitely* should return [] for Never
         # Maybe we should lift over unions and return the union of
         # each tuples position...
-        raise TypeError(
-            f"Invalid type argument to Iter: {tp} is not a fixed-length tuple"
-        )
+        raise TypeError(f"Invalid type argument to Iter: {tp} is not a tuple")
+
+
+def _unbounded_as_one(tps):
+    # For any() and all(), assume an unbounded part has at least one element
+    return [
+        typing.get_args(typing.get_args(tp)[0])[0]
+        if _typing_inspect.is_unbounded_tuple_unpack(tp)
+        else tp
+        for tp in tps
+    ]
 
 
 # N.B: These handle unions on their own
@@ -523,12 +530,16 @@ def _eval_Or(*tps, ctx):
 # These aren't lazy, so that the _UnpackMap gets expanded into the arguments
 @type_eval.register_evaluator(_Any)
 def _eval_Any(*tps, ctx):
-    return _BoolLiteral[any(_eval_test(tp, ctx) for tp in tps)]
+    return _BoolLiteral[
+        any(_eval_test(tp, ctx) for tp in _unbounded_as_one(tps))
+    ]
 
 
 @type_eval.register_evaluator(_All)
 def _eval_All(*tps, ctx):
-    return _BoolLiteral[all(_eval_test(tp, ctx) for tp in tps)]
+    return _BoolLiteral[
+        all(_eval_test(tp, ctx) for tp in _unbounded_as_one(tps))
+    ]
 
 
 @type_eval.register_evaluator(_Cond, lazy=True)
@@ -543,11 +554,21 @@ def _eval_UnpackMap(tps, tv, tres, tcond=typing.Literal[True], *, ctx):
 
     results = []
     for tp in _eval_Iter(tps, ctx=ctx):
-        if _eval_test(_apply_generic.substitute(tcond, {tv: tp}), ctx):
-            # _eval_args so that an Unpack or an _UnpackMap gets expanded
-            results.extend(
-                _eval_args([_apply_generic.substitute(tres, {tv: tp})], ctx)
-            )
+        unbounded = _typing_inspect.is_unbounded_tuple_unpack(tp)
+        if unbounded:
+            tp = typing.get_args(typing.get_args(tp)[0])[0]
+        if not _eval_test(_apply_generic.substitute(tcond, {tv: tp}), ctx):
+            continue
+        # _eval_args so that an Unpack or an _UnpackMap gets expanded
+        res = _eval_args([_apply_generic.substitute(tres, {tv: tp})], ctx)
+        if unbounded:
+            if len(res) != 1 or typing.get_origin(res[0]) is typing.Unpack:
+                raise TypeError(
+                    "Each element of an unbounded tuple must map to "
+                    f"exactly one type, got {res}"
+                )
+            res = (typing.Unpack[tuple[res[0], ...]],)
+        results.extend(res)
     return typing.Unpack[tuple[*results]]
 
 
@@ -1268,8 +1289,10 @@ def _eval_DropAnnotations(tp, *, ctx) -> typing.Any:
 def _eval_Length(tp, *, ctx) -> typing.Any:
     tp = _eval_types(tp, ctx)
     if _typing_inspect.is_generic_alias(tp) and tp.__origin__ is tuple:
-        # TODO: Unpack in the middle?
-        if not tp.__args__ or tp.__args__[-1] is not Ellipsis:
+        if not any(
+            arg is Ellipsis or _typing_inspect.is_unbounded_tuple_unpack(arg)
+            for arg in tp.__args__
+        ):
             return typing.Literal[len(tp.__args__)]
         else:
             return typing.Literal[None]
