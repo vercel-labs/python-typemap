@@ -9,10 +9,12 @@ from typing import (
     Annotated,
     Any,
     Callable,
+    Concatenate,
     Generic,
     List,
     Literal,
     Never,
+    ParamSpec,
     Self,
     Tuple,
     TypeVar,
@@ -3073,3 +3075,68 @@ def test_substitute_01():
     assert substitute(tuple[T, *Ts], args) == tuple[int, int, str]
     assert substitute(Callable[[*Ts], T], args) == Callable[[int, str], int]
     assert substitute(tuple[U, *Ts], {T: int}) == tuple[U, *Ts]
+
+
+def test_substitute_02():
+    P = ParamSpec("P")
+    args = {T: int, P: [int, str]}
+
+    assert substitute(Callable[P, T], args) == Callable[[int, str], int]
+    assert (
+        substitute(Callable[Concatenate[T, P], T], args)
+        == Callable[[int, int, str], int]
+    )
+    assert (
+        substitute(collections.abc.Callable[[T], T], args)
+        == collections.abc.Callable[[int], int]
+    )
+    assert substitute(Callable, args) is Callable
+
+    class G[**Q]:
+        pass
+
+    assert substitute(G[[T, str]], args) == G[[int, str]]
+    assert substitute(G[P], args) == G[[int, str]]
+    assert substitute(G[Concatenate[T, P]], args) == G[[int, int, str]]
+    assert substitute(Literal["T"], args) == Literal["T"]
+
+
+def test_substitute_binding_sites_01():
+    U = TypeVar("U")
+
+    # The GenericCallable's T shadows the outer one
+    gc = GenericCallable[tuple[T], Callable[[T, U], T]]
+    assert (
+        substitute(gc, {T: int, U: str})
+        == GenericCallable[tuple[T], Callable[[T, str], T]]
+    )
+    assert substitute(list[gc], {T: int}) == list[gc]
+
+    gc2 = GenericCallable[tuple[U], Callable[[T, U], T]]
+    assert (
+        substitute(gc2, {T: int, U: str})
+        == GenericCallable[tuple[U], Callable[[int, U], int]]
+    )
+
+
+def test_substitute_binding_sites_02():
+    U = TypeVar("U")
+
+    # Ts is free, but T is bound in the result and condition
+    um = _UnpackMap[tuple[T, U], T, list[T], IsAssignable[T, U]]
+    assert (
+        substitute(um, {T: int, U: str})
+        == _UnpackMap[tuple[int, str], T, list[T], IsAssignable[T, str]]
+    )
+
+    # Nested reuse of the same variable
+    inner = _UnpackMap[tuple[T], T, list[T]]
+    outer = _UnpackMap[tuple[U], T, tuple[T, *inner]]
+    assert (
+        substitute(outer, {T: int, U: str})
+        == _UnpackMap[tuple[str], T, tuple[T, *inner]]
+    )
+    assert (
+        substitute(tuple[T, *inner], {T: int})
+        == tuple[int, *_UnpackMap[tuple[int], T, list[T]]]
+    )

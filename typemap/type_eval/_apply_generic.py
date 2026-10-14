@@ -1,5 +1,6 @@
 import annotationlib
 import collections
+import collections.abc
 import dataclasses
 import inspect
 import sys
@@ -79,29 +80,143 @@ class Boxed:
             b.dump(_level=_level + 1)
 
 
-def _subst_arg(param, args):
-    is_tvt = isinstance(param, typing.TypeVarTuple)
-    if param not in args:
-        return typing.Unpack[param] if is_tvt else param
-    arg = args[param]
-    if is_tvt and typing.get_origin(arg) is tuple:
-        return typing.Unpack[arg]
-    return arg
+_TYPE_VAR_LIKE = (typing.TypeVar, typing.TypeVarTuple, typing.ParamSpec)
+
+
+def _bound_vars(binder):
+    if isinstance(binder, _TYPE_VAR_LIKE):
+        return {binder}
+    bound = set()
+    for v in typing.get_args(binder):
+        if _typing_inspect.is_type_var_tuple_unpack(v):
+            v = typing.get_args(v)[0]
+        bound.add(v)
+    return bound
+
+
+def _subst_args(tys, args, *, binding_sites=(), flatten_params=False):
+    """Substitute into a sequence of type arguments.
+
+    binding_sites is in the format of ``__binding_sites__`` (see
+    substitute), giving which variables in tys are bound where.
+
+    TypeVarTuples substituted with a fixed-length tuple are spliced
+    in. If flatten_params, ParamSpecs substituted with a list of types
+    are too, as is the result of substituting into a Concatenate.
+    """
+    # TODO: This doesn't avoid capture: if a type being substituted in
+    # has a free variable that is bound here, it gets captured. Full
+    # capture avoidance would need to compute the free variables of
+    # the substituted types and rename any bound variables that clash.
+    arg_maps = [args] * len(tys)
+    for vars_index, positions in binding_sites:
+        bound = _bound_vars(tys[vars_index])
+        # The binders themselves are never substituted
+        arg_maps[vars_index] = {}
+        for pos in positions:
+            arg_maps[pos] = {
+                k: v for k, v in arg_maps[pos].items() if k not in bound
+            }
+
+    res = []
+    for ty, ty_args in zip(tys, arg_maps, strict=True):
+        new = substitute(ty, ty_args)
+        if (
+            _typing_inspect.is_type_var_tuple_unpack(ty)
+            and typing.get_origin(new) is typing.Unpack
+            and typing.get_origin(inner := typing.get_args(new)[0]) is tuple
+            and not _typing_inspect.is_unbounded_tuple(inner)
+        ):
+            res.extend(typing.get_args(inner))
+        elif flatten_params and isinstance(new, (list, tuple)):
+            res.extend(new)
+        else:
+            res.append(new)
+    return res
+
+
+def _same(old, new):
+    return len(old) == len(new) and all(
+        a is b for a, b in zip(old, new, strict=True)
+    )
+
+
+def _make_callable_params(params):
+    if len(params) == 1 and (
+        params[0] is Ellipsis
+        or isinstance(
+            params[0], (typing.ParamSpec, typing._ConcatenateGenericAlias)
+        )
+    ):
+        return params[0]
+    return list(params)
 
 
 def substitute(ty, args):
-    if isinstance(ty, (typing.TypeVar, typing.TypeVarTuple, typing.ParamSpec)):
-        return args.get(ty, ty)
-    elif typing.get_origin(ty) is typing.Unpack:
-        return typing.Unpack[substitute(typing.get_args(ty)[0], args)]
+    """Substitute type variables in ty according to args.
 
-    # Lean on typing's own substitution machinery, which knows how to
-    # handle Callable, Annotated, etc., by wrapping ty in a tuple.
-    wrapped = tuple[ty]
-    params = wrapped.__parameters__
-    if not any(p in args for p in params):
+    Respects binding sites, given by a ``__binding_sites__`` attribute
+    on the origin of a generic alias: a list of ``(vars_index,
+    positions)`` pairs saying that the type variable (or tuple of
+    type variables) at argument ``vars_index`` is bound in the
+    arguments at ``positions``. Bound variables are not substituted
+    within their scope.
+    """
+    if not args:
         return ty
-    return wrapped[*[_subst_arg(p, args) for p in params]].__args__[0]
+
+    if isinstance(ty, _TYPE_VAR_LIKE):
+        return args.get(ty, ty)
+
+    if isinstance(ty, (list, tuple)):
+        new = _subst_args(ty, args)
+        return ty if _same(ty, new) else type(ty)(new)
+
+    if _typing_inspect.is_union_type(ty):
+        old = typing.get_args(ty)
+        new = _subst_args(old, args)
+        return ty if _same(old, new) else typing.Union[*new]
+
+    if not _typing_inspect.is_generic_alias(ty):
+        return ty
+
+    origin = typing.get_origin(ty)
+    old = typing.get_args(ty)
+
+    if not old or origin is typing.Literal:
+        return ty
+
+    if origin is typing.Annotated:
+        new_origin = substitute(old[0], args)
+        if new_origin is old[0]:
+            return ty
+        return typing.Annotated[new_origin, *ty.__metadata__]
+
+    if origin is collections.abc.Callable:
+        new_params = _subst_args(old[:-1], args, flatten_params=True)
+        ret = substitute(old[-1], args)
+        if _same(old, [*new_params, ret]):
+            return ty
+        if isinstance(ty, typing._GenericAlias):
+            return ty.copy_with((*new_params, ret))
+        return collections.abc.Callable[_make_callable_params(new_params), ret]
+
+    new = _subst_args(
+        old, args, binding_sites=getattr(origin, "__binding_sites__", ())
+    )
+    if _same(old, new):
+        return ty
+
+    if isinstance(ty, types.GenericAlias):
+        res = types.GenericAlias(origin, tuple(new))
+        if ty.__unpacked__:
+            (res,) = res
+        return res
+
+    # Everything else is a typing._GenericAlias. A ParamSpec argument
+    # substituted with a list of types is stored as a tuple.
+    new = [tuple(a) if isinstance(a, list) else a for a in new]
+    return ty.copy_with(tuple(new))
 
 
 def box(cls: type[Any]) -> Boxed:

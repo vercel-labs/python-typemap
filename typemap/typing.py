@@ -101,6 +101,8 @@ class SpecialFormEllipsis:
 
 
 class GenericCallable:
+    __binding_sites__ = [(0, [1])]
+
     def __class_getitem__(cls, params):
         if not isinstance(params, tuple) or len(params) != 2:
             raise TypeError(
@@ -402,7 +404,7 @@ class _UnpackMap[Ts, T, R, C = Literal[True]]:
     while evaluating R and C.
     """
 
-    pass
+    __binding_sites__ = [(1, [2, 3])]
 
 
 class _BoolLiteralGenericAlias(_LiteralGenericAlias, _root=True):
