@@ -333,8 +333,6 @@ def get_local_defns(
         str, types.FunctionType | classmethod | staticmethod | WrappedOverloads
     ],
 ]:
-    from typemap.typing import GenericCallable
-
     annos: dict[str, Any] = {}
     dct: dict[str, Any] = {}
 
@@ -353,55 +351,20 @@ def get_local_defns(
             # TODO: This annos_ok thing is a hack because processing
             # __annotations__ on methods broke stuff and I didn't want
             # to chase it down yet.
-            stuck = False
             rr = get_annotations(
                 stuff, boxed.str_args, cls=boxed.cls, annos_ok=False
             )
 
             if rr is not None:
                 local_fn = make_func(orig, rr)
-            elif not stuck and getattr(stuff, "__annotations__", None):
+            elif getattr(stuff, "__annotations__", None):
                 # XXX: This is totally wrong; we still need to do
                 # substitute in class vars
                 local_fn = stuff
             elif overloads := typing.get_overloads(stuff):
                 local_fn = WrappedOverloads(tuple(overloads))
 
-            # If we got stuck, we build a GenericCallable that
-            # computes the type once it has been given type
-            # variables!
-            if stuck and stuff.__type_params__:
-                type_params = stuff.__type_params__
-                str_args = boxed.str_args
-                canonical_cls = boxed.canonical_cls
-
-                def _make_lambda(fn, o, sa, tp, cls):
-                    from ._eval_operators import _function_type_from_sig
-
-                    def lam(*vs):
-                        args = dict(sa)
-                        args.update(
-                            zip(
-                                (str(p) for p in tp),
-                                vs,
-                                strict=True,
-                            )
-                        )
-                        sig = _resolved_function_signature(fn, args)
-                        return _function_type_from_sig(
-                            sig, o, receiver_type=cls
-                        )
-
-                    return lam
-
-                gc = GenericCallable[  # type: ignore[valid-type,misc]
-                    tuple[*type_params],  # type: ignore[valid-type]
-                    _make_lambda(
-                        stuff, orig, str_args, type_params, canonical_cls
-                    ),
-                ]
-                annos[name] = typing.ClassVar[gc]
-            elif local_fn is not None:
+            if local_fn is not None:
                 if orig.__class__ is classmethod:
                     local_fn = classmethod(local_fn)
                 elif orig.__class__ is staticmethod:
