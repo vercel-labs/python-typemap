@@ -14,7 +14,6 @@ from typemap_extensions import (
     GetArg,
     InitField,
     IsAssignable,
-    Iter,
     Member,
     Members,
     NewProtocol,
@@ -88,18 +87,18 @@ type BaseArg[T] = (
 
 
 type AllOptional[T] = NewProtocol[
-    *[Member[p.name, p.type | None, p.quals] for p in Iter[Attrs[T]]]
+    *[Member[p.name, p.type | None, p.quals] for p in Attrs[T]]
 ]
 
 type OptionalFinal = AllOptional[Final]
 
 
 type Capitalize[T] = NewProtocol[
-    *[Member[Uppercase[p.name], p.type, p.quals] for p in Iter[Attrs[T]]]
+    *[Member[Uppercase[p.name], p.type, p.quals] for p in Attrs[T]]
 ]
 
 type Prims[T] = NewProtocol[
-    *[p for p in Iter[Attrs[T]] if IsAssignable[p.type, int | str]]
+    *[p for p in Attrs[T] if IsAssignable[p.type, int | str]]
 ]
 
 type NoLiterals1[T] = NewProtocol[
@@ -109,7 +108,7 @@ type NoLiterals1[T] = NewProtocol[
             Union[
                 *[
                     t
-                    for t in Iter[FromUnion[p.type]]
+                    for t in FromUnion[p.type]
                     # XXX: 'typing.Literal' is not *really* a type...
                     # Maybe we can't do this, which maybe is fine.
                     if not IsAssignable[t, Literal]
@@ -117,7 +116,7 @@ type NoLiterals1[T] = NewProtocol[
             ],
             p.quals,
         ]
-        for p in Iter[Attrs[T]]
+        for p in Attrs[T]
     ]
 ]
 
@@ -144,7 +143,7 @@ type NoLiterals2[T] = NewProtocol[
             Union[
                 *[
                     t
-                    for t in Iter[FromUnion[p.type]]
+                    for t in FromUnion[p.type]
                     # XXX: 'typing.Literal' is not *really* a type...
                     # Maybe we can't do this, which maybe is fine.
                     # if not IsAssignabletype[t, Literal]
@@ -153,7 +152,7 @@ type NoLiterals2[T] = NewProtocol[
             ],
             p.quals,
         ]
-        for p in Iter[Attrs[T]]
+        for p in Attrs[T]
     ]
 ]
 

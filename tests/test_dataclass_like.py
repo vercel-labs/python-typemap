@@ -74,7 +74,7 @@ type InitFnType[T] = typing.Member[
                     # directly as D.
                     GetDefault[p.init],
                 ]
-                for p in typing.Iter[typing.Attrs[T]]
+                for p in typing.Attrs[T]
             ],
         ],
         None,
@@ -83,7 +83,7 @@ type InitFnType[T] = typing.Member[
 ]
 type AddInit[T] = typing.NewProtocol[
     InitFnType[T],
-    *[x for x in typing.Iter[typing.Members[T]]],
+    *[x for x in typing.Members[T]],
 ]
 
 """

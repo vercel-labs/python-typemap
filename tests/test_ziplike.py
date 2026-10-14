@@ -20,7 +20,7 @@ type ElemOf[T] = typing.GetArg[T, Iterable, Literal[0]]
 
 def zip[*Ts](
     *args: *Ts, strict: bool = False
-) -> Iterator[tuple[*[ElemOf[t] for t in typing.Iter[tuple[*Ts]]]]]:
+) -> Iterator[tuple[*[ElemOf[t] for t in tuple[*Ts]]]]:
     return builtins.zip(*args, strict=strict)  # type: ignore[call-overload]
 
 
@@ -58,9 +58,9 @@ raise an error.
 
 type Zip[T, S] = (
     tuple[()]
-    if typing.Bool[Empty[T]] and typing.Bool[Empty[S]]
+    if Empty[T] and Empty[S]
     else typing.RaiseError[Literal["Zip length mismatch"], T, S]
-    if typing.Bool[Empty[T]] or typing.Bool[Empty[S]]
+    if Empty[T] or Empty[S]
     else tuple[*Zip[DropLast[T], DropLast[S]], tuple[Last[T], Last[S]]]
 )
 
@@ -69,23 +69,23 @@ type Zip[T, S] = (
 
 
 # ZipN generalizes Zip to any number of input tuples. Its argument T
-# is a tuple of tuples; Iter[T] lets us map operators over each input.
+# is a tuple of tuples; T lets us map operators over each input.
 # The length check is expressed as a union: all lengths collapse to a
 # single Literal iff they agree.
 
 type First[T] = typing.GetArg[T, tuple, Literal[0]]
-type DropLastEach[T] = tuple[*[DropLast[t] for t in typing.Iter[T]]]
-type LastEach[T] = tuple[*[Last[t] for t in typing.Iter[T]]]
+type DropLastEach[T] = tuple[*[DropLast[t] for t in T]]
+type LastEach[T] = tuple[*[Last[t] for t in T]]
 type AllSameLength[T] = typing.IsEquivalent[
-    Union[*[typing.Length[t] for t in typing.Iter[T]]],
+    Union[*[typing.Length[t] for t in T]],
     typing.Length[First[T]],
 ]
 
 type ZipN[T] = (
     tuple[()]
-    if typing.Bool[Empty[First[T]]] and typing.Bool[AllSameLength[T]]
+    if Empty[First[T]] and AllSameLength[T]
     else tuple[*ZipN[DropLastEach[T]], LastEach[T]]
-    if typing.Bool[AllSameLength[T]]
+    if AllSameLength[T]
     else typing.RaiseError[Literal["ZipN length mismatch"], T]
 )
 

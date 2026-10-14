@@ -501,12 +501,11 @@ def flatten_class_new_proto(cls: type) -> type:
     #
     # It works except for methods, since NewProtocol doesn't understand those.
     from typemap.typing import (
-        Iter,
         Members,
         NewProtocol,
     )
 
-    type ClsAlias = NewProtocol[*[m for m in Iter[Members[cls]]]]  # type: ignore[valid-type]
+    type ClsAlias = NewProtocol[*[m for m in Members[cls]]]  # type: ignore[valid-type]
     nt = _eval_typing.eval_typing(ClsAlias)
 
     args = typing.get_args(cls)

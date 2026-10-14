@@ -20,7 +20,6 @@ from typemap.typing import _Cond, _GetAssociated
 from typemap_extensions import (
     Attrs,  # noqa: F401
     IsAssignable,
-    Iter,
     Member,
 )
 
@@ -67,11 +66,11 @@ def test_type_ast_bool_ops_01():
 
 
 def test_type_ast_comprehension_01():
-    src = "tuple[*[list[t] for t in Iter[Ts] if IsAssignable[t, int]]]"
+    src = "tuple[*[list[t] for t in Ts if IsAssignable[t, int]]]"
     assert _eval(src, Ts=tuple[int, str, bool]) == tuple[list[int], list[bool]]
     assert _eval(src, Ts=tuple[()]) == tuple[()]
 
-    src = "tuple[str, *[list[t] for t in Iter[Ts]], str]"
+    src = "tuple[str, *[list[t] for t in Ts], str]"
     assert (
         _eval(src, Ts=tuple[int, bool])
         == tuple[str, list[int], list[bool], str]
@@ -83,9 +82,9 @@ def test_type_ast_comprehension_02():
     tuple[
         *[
             dict[a, b]
-            for a in Iter[As]
+            for a in As
             if not IsAssignable[a, bool]
-            for b in Iter[tuple[a, None]]
+            for b in tuple[a, None]
             if IsAssignable[a, int] or IsAssignable[b, None]
         ]
     ]
@@ -102,19 +101,19 @@ def test_type_ast_comprehension_02():
 
 
 def test_type_ast_comprehension_03():
-    src = "tuple[*[*[t for t in Iter[Ts]]]]"
+    src = "tuple[*[*[t for t in Ts]]]"
     assert _eval(src, Ts=tuple[int]) == tuple[int]
 
 
 def test_type_ast_comprehension_04():
     # The inner t shadows the outer one, which it iterates over
-    src = "tuple[*[list[t] for t in Iter[Ts] for t in Iter[t]]]"
+    src = "tuple[*[list[t] for t in Ts for t in t]]"
     assert (
         _eval(src, Ts=tuple[tuple[int, str], tuple[bool]])
         == tuple[list[int], list[str], list[bool]]
     )
 
-    res = _conv("tuple[*[list[t] for t in Iter[Ts]]]", Ts=tuple[int])
+    res = _conv("tuple[*[list[t] for t in Ts]]", Ts=tuple[int])
     unpack_map = res.__args__[0]
     ts, tv, body, cond = unpack_map.__args__
     assert isinstance(tv, TypeVar) and tv.__name__ == "t"
@@ -128,7 +127,7 @@ class Point:
 
 
 def test_type_ast_member_access_01():
-    src = "tuple[*[Member[m.name, set[m.type]] for m in Iter[Attrs[C]]]]"
+    src = "tuple[*[Member[m.name, set[m.type]] for m in Attrs[C]]]"
     assert (
         _eval(src, C=Point)
         == tuple[
@@ -146,12 +145,12 @@ def test_type_ast_member_access_02():
 
 
 def test_type_ast_any_all_01():
-    src = "int if any(IsAssignable[t, int] for t in Iter[Ts]) else str"
+    src = "int if any(IsAssignable[t, int] for t in Ts) else str"
     assert _eval(src, Ts=tuple[str, bool]) is int
     assert _eval(src, Ts=tuple[str, float]) is str
     assert _eval(src, Ts=tuple[()]) is str
 
-    src = "int if all(IsAssignable[t, int] for t in Iter[Ts]) else str"
+    src = "int if all(IsAssignable[t, int] for t in Ts) else str"
     assert _eval(src, Ts=tuple[int, bool]) is int
     assert _eval(src, Ts=tuple[int, str]) is str
     assert _eval(src, Ts=tuple[()]) is int
@@ -159,9 +158,9 @@ def test_type_ast_any_all_01():
     src = """
     all(
         IsAssignable[a, b]
-        for a in Iter[As]
+        for a in As
         if IsAssignable[a, int]
-        for b in Iter[tuple[int, a]]
+        for b in tuple[int, a]
     )
     """
     assert _eval(src, As=tuple[int, bool, str]) == Literal[True]
@@ -171,16 +170,16 @@ def test_type_ast_any_all_01():
 
 def test_type_ast_errors_01():
     with pytest.raises(SyntaxError, match="unpacked lists"):
-        _conv("tuple[[t for t in Iter[Ts]]]", Ts=tuple[int])
+        _conv("tuple[[t for t in Ts]]", Ts=tuple[int])
     with pytest.raises(SyntaxError, match="single variable"):
-        _conv("tuple[*[a for a, b in Iter[Ts]]]", Ts=tuple[int])
-    with pytest.raises(TypeError, match="Iter"):
-        _conv("tuple[*[t for t in Ts]]", Ts=tuple[int])
+        _conv("tuple[*[a for a, b in Ts]]", Ts=tuple[int])
+    with pytest.raises(TypeError, match="iterate over tuples"):
+        _eval("tuple[*[t for t in Ts]]", Ts=int)
 
 
 def g[T](
     x: T,
-) -> tuple[*[list[t] if IsAssignable[t, int] else t for t in Iter[T]]]:
+) -> tuple[*[list[t] if IsAssignable[t, int] else t for t in T]]:
     raise NotImplementedError
 
 
@@ -225,7 +224,7 @@ def test_type_ast_class_scope_01():
     assert type_ast_to_type("(lambda x=X: x)", env=env)() is int
 
     # Only the outermost iterable of a comprehension can see it
-    src = "tuple[*[tuple[t, X] for t in Iter[Ts]]]"
+    src = "tuple[*[tuple[t, X] for t in Ts]]"
     assert (
         eval_typing(type_ast_to_type(src, env=env)) == tuple[tuple[bool, str]]
     )
@@ -243,7 +242,7 @@ def test_type_ast_class_scope_02():
 def test_type_ast_class_scope_03():
     # any and all are syntax, even if the class has its own
     env = _class_env(any=None, Ts=tuple[str, bool])
-    src = "int if any(IsAssignable[t, int] for t in Iter[Ts]) else str"
+    src = "int if any(IsAssignable[t, int] for t in Ts) else str"
     assert eval_typing(type_ast_to_type(src, env=env)) is int
 
 

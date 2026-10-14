@@ -63,7 +63,7 @@ def select[ModelT, K: typing.BaseTypedDict](
                 c.name,
                 ConvertField[typing.GetMemberType[ModelT, c.name]],
             ]
-            for c in typing.Iter[typing.Attrs[K]]
+            for c in typing.Attrs[K]
         ]
     ]
 ]:
@@ -114,7 +114,7 @@ contains all the ``Property`` attributes of ``T``.
 type PropsOnly[T] = typing.NewProtocol[
     *[
         typing.Member[p.name, PointerArg[p.type]]
-        for p in typing.Iter[typing.Attrs[T]]
+        for p in typing.Attrs[T]
         if typing.IsAssignable[p.type, Property]
     ]
 ]

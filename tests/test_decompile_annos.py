@@ -213,7 +213,7 @@ _ALTERNATES: dict[str, str] = {
             tuple[
                 *[
                     m.type
-                    for m in Iter[Members[T]]
+                    for m in Members[T]
                     if not (
                         not IsAssignable[m.type, Callable]
                         and (not IsAssignable[m.type, GenericCallable])
@@ -237,9 +237,9 @@ _ALTERNATES: dict[str, str] = {
     """,
     "test_ziplike::Zip": """
         tuple[()]
-        if typing.Bool[Empty[T]] and typing.Bool[Empty[S]]
+        if Empty[T] and Empty[S]
         else tuple[*Zip[DropLast[T], DropLast[S]], tuple[Last[T], Last[S]]]
-        if not typing.Bool[Empty[T]] and (not typing.Bool[Empty[S]])
+        if not Empty[T] and (not Empty[S])
         else typing.RaiseError[Literal["Zip length mismatch"], T, S]
     """,
 }

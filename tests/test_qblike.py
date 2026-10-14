@@ -10,7 +10,6 @@ from typemap.type_eval import (
 from typemap_extensions import (
     BaseTypedDict,
     NewProtocol,
-    Iter,
     Attrs,
     IsAssignable,
     Member,
@@ -30,7 +29,7 @@ class Link[T]:
 
 
 type PropsOnly[T] = NewProtocol[
-    *[p for p in Iter[Attrs[T]] if IsAssignable[p.type, Property]]
+    *[p for p in Attrs[T] if IsAssignable[p.type, Property]]
 ]
 
 # Conditional type alias!
@@ -49,7 +48,7 @@ def select[K: BaseTypedDict](
             c.name,
             FilterLinks[GetMemberType[A, c.name]],
         ]
-        for c in Iter[Attrs[K]]
+        for c in Attrs[K]
     ]
 ]:
     raise NotImplementedError

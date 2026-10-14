@@ -5,7 +5,7 @@ proposed in PEP 827 into the equivalent type operators:
 
 * ``A if B else C`` becomes ``_Cond[B, A, C]``
 * ``not``, ``and``, ``or`` become ``_Not``, ``_And``, ``_Or``
-* ``*[A for t in Iter[T] if B]`` becomes ``_UnpackMap[T, t, A, B]``,
+* ``*[A for t in T if B]`` becomes ``_UnpackMap[T, t, A, B]``,
   where ``t`` is a fresh ``TypeVar``
 * ``any(A for ...)``/``all(A for ...)`` become ``_Any``/``_All`` of
   the ``_UnpackMap`` for ``*[A for ...]``
@@ -27,7 +27,6 @@ from typemap.annotations import BindingEnvironment, BindingNamespace
 from typemap.typing import (
     _Cond,
     _GetAssociated,
-    Iter,
     _UnpackMap,
     _All,
     _And,
@@ -55,14 +54,6 @@ class _GlobalsWithFallback(dict):
         return type(self)(self, self.fallback)
 
 
-def _strip_iter(tp):
-    if typing.get_origin(tp) is not Iter:
-        raise TypeError(
-            f"Type comprehensions must iterate over Iter[...], got {tp!r}"
-        )
-    return typing.get_args(tp)[0]
-
-
 def _getattr(obj, name):
     if isinstance(obj, typing.TypeVar):
         return _GetAssociated[obj, typing.Literal[name]]
@@ -77,7 +68,6 @@ _HELPERS = {
     "__typemap_Or": _Or,
     "__typemap_Any": _Any,
     "__typemap_All": _All,
-    "__typemap_strip_iter": _strip_iter,
     "__typemap_getattr": _getattr,
 }
 
@@ -230,11 +220,7 @@ class _Rewriter(ast.NodeTransformer):
             )
         var = gen.target.id
 
-        iter = ast.Call(
-            func=_name("strip_iter"),
-            args=[self.visit(gen.iter)],
-            keywords=[],
-        )
+        iter = self.visit(gen.iter)
 
         tv_name = f"__typemap_tv{len(self.typevars)}"
         self.typevars[tv_name] = typing.TypeVar(var)
