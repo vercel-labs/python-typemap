@@ -852,3 +852,13 @@ type MultiForAlias[A, B] = tuple[
 
 
 def fn159[T]() -> tuple[*[x + y for x in Iter[T] for y in x]]: ...
+
+
+# ---------------------------------------------------------------------------
+# Mixed and/or
+# ---------------------------------------------------------------------------
+
+type AndThenOr[A, B, C] = (A and B) or C
+type AndOrAnd[A, B, C, D] = (A and B) or (C and D)
+type OrOfAnds[A, B, C, D, E] = A or (B and C) or (D and E)
+type IfAndElse[A, B, C] = B if A and B else C
