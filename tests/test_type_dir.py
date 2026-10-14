@@ -6,7 +6,8 @@ import typing
 from typing import Literal, Never, TypeVar, TypedDict, Union, ReadOnly
 
 from typemap.type_eval import eval_typing, _ensure_context
-from typemap.typing import _Cond
+from typemap.type_eval._apply_generic import substitute
+from typemap.typing import GenericCallable, _Cond
 from typemap_extensions import (
     Attrs,
     FromUnion,
@@ -334,13 +335,15 @@ def test_type_dir_10():
 
     member = _get_member(eval_typing(Members[Lurr]), "foo")
 
-    fn = member.__args__[1].__args__[1]
+    tvs, fn = typing.get_args(member.__args__[1])
+    (T,) = typing.get_args(tvs)
     with _ensure_context():
         assert (
-            fn(str).__args__[1] == _Cond[IsAssignable[str, str], int, list[int]]
+            substitute(fn, {T: str}).__args__[1]
+            == _Cond[IsAssignable[str, str], int, list[int]]
         )
         assert (
-            fn(bool).__args__[1]
+            substitute(fn, {T: bool}).__args__[1]
             == _Cond[IsAssignable[bool, str], int, list[int]]
         )
 
@@ -426,11 +429,9 @@ def test_type_members_func_3():
     assert name == typing.Literal["sbase"]
     assert quals == typing.Literal["ClassVar"]
 
-    assert str(typ) == "typemap.typing.GenericCallable[tuple[Z], <...>]"
+    assert typing.get_origin(typ) is GenericCallable
 
-    evaled = eval_typing(
-        typing.get_args(typ)[1](*typing.get_args(typing.get_args(typ)[0]))
-    )
+    evaled = eval_typing(typing.get_args(typ)[1])
     assert (
         str(evaled)
         == "staticmethod[typemap.typing.Params[typemap.typing.Param[typing.Literal['a'], int | typing.Literal['gotcha!'] | Z | None, typing.Literal[<ParamKind.POSITIONAL_OR_KEYWORD: 1>], typing.Never], typemap.typing.Param[typing.Literal['b'], ~K, typing.Literal[<ParamKind.POSITIONAL_OR_KEYWORD: 1>], typing.Never]], dict[str, int | Z]]"

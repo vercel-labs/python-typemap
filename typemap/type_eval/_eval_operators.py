@@ -784,10 +784,8 @@ def _callable_type_to_method(name, typ, ctx):
 
     head = typing.get_origin(typ)
     if head is GenericCallable:
-        # Call the lambda with type variables to substitute the type variables
-        ttparams, ttfunc = typing.get_args(typ)
+        ttparams, typ = typing.get_args(typ)
         type_params = typing.get_args(ttparams)
-        typ = ttfunc(*type_params)
         head = typing.get_origin(typ)
 
     if head is classmethod:
@@ -910,35 +908,15 @@ def _function_type(func, *, receiver_type):
     f = _function_type_from_sig(sig, func, receiver_type=receiver_type)
 
     if root.__type_params__:
-        # Must store a lambda that performs type variable substitution
-        type_params = root.__type_params__
-        callable_lambda = _create_generic_callable_lambda(f, type_params)
-        f = GenericCallable[tuple[*type_params], callable_lambda]
+        f = GenericCallable[tuple[*root.__type_params__], f]
     return f
 
 
-def _create_generic_callable_lambda(
-    f: typing.Callable | classmethod | staticmethod,
-    type_params: tuple[typing.TypeVar, ...],
-):
-    if typing.get_origin(f) in (staticmethod, classmethod):
-        return lambda *vs: _apply_generic.substitute(
-            f, dict(zip(type_params, vs, strict=True))
-        )
-
-    else:
-        # Callable params are stored as Params[...]
-        params, ret = typing.get_args(f)
-
-        return lambda *vs: typing.Callable[
-            _apply_generic.substitute(
-                params,
-                dict(zip(type_params, vs, strict=True)),
-            ),
-            _apply_generic.substitute(
-                ret, dict(zip(type_params, vs, strict=True))
-            ),
-        ]
+# The callable is left unevaluated, since its type variables aren't
+# bound yet.
+@type_eval.register_evaluator(GenericCallable, lazy=True)
+def _eval_GenericCallable(tvs, callable, *, ctx):
+    return GenericCallable[_eval_types(tvs, ctx), callable]
 
 
 def _hint_to_member(n, t, qs, init, d, *, ctx):
@@ -1201,7 +1179,7 @@ def _eval_GetArg(tp, base, idx, *, ctx) -> typing.Any:
         idx_val = _eval_literal(idx, ctx)
 
         if base_head is GenericCallable and idx_val >= 1:
-            # Disallow access to callable lambda
+            # The callable's type variables are bound, so don't expose it
             raise TypeMapError(
                 f"GetArg: cannot access index {idx_val} of GenericCallable"
             )
@@ -1220,7 +1198,7 @@ def _eval_GetArgs(tp, base, *, ctx) -> typing.Any:
         raise TypeMapError(f"GetArgs: {tp!r} is not a subclass of {base!r}")
 
     if base_head is GenericCallable:
-        # Disallow access to callable lambda
+        # The callable's type variables are bound, so don't expose it
         return tuple[args[0]]  # type: ignore[valid-type]
 
     return tuple[*args]  # type: ignore[valid-type]

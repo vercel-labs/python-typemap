@@ -393,9 +393,9 @@ def type_ast_to_type(
             _CLASS_LOOKUP: _class_lookup(env.classdict, scope),
         }
 
-    # Lambdas (like in GenericCallable) created by eval can't see a
-    # separate locals dict, so everything needs to go in globals. The
-    # fallback lets that be done without copying globals.
+    # Lambdas created by eval can't see a separate locals dict, so
+    # everything needs to go in globals. The fallback lets that be done
+    # without copying globals.
     return eval(
         code,
         _GlobalsWithFallback(

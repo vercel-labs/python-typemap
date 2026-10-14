@@ -100,34 +100,15 @@ class SpecialFormEllipsis:
 ###
 
 
-class _GenericCallableGenericAlias(_GenericAlias, _root=True):
-    def __repr__(self):
-        from typing import _type_repr
-
-        name = _type_repr(self.__origin__)
-        if self.__args__:
-            rargs = [_type_repr(self.__args__[0]), "<...>"]
-            args = ", ".join(rargs)
-        else:
-            # To ensure the repr is eval-able.
-            args = "()"
-        return f'{name}[{args}]'
-
-
 class GenericCallable:
     def __class_getitem__(cls, params):
-        message = (
-            "GenericCallable must be used as "
-            "GenericCallable[tuple[TypeVar, ...], lambda <vs>: callable]."
-        )
         if not isinstance(params, tuple) or len(params) != 2:
-            raise TypeError(message)
+            raise TypeError(
+                "GenericCallable must be used as "
+                "GenericCallable[tuple[TypeVar, ...], callable]."
+            )
 
-        typevars, func = params
-        if not callable(func):
-            raise TypeError(message)
-
-        return _GenericCallableGenericAlias(cls, (typevars, func))
+        return _GenericAlias(cls, params)
 
 
 class Overloaded[*Callables]:
