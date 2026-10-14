@@ -26,6 +26,7 @@ from typing import (
 import pytest
 
 from typemap.type_eval import _ensure_context, eval_typing
+from typemap.type_eval._apply_generic import substitute
 from typemap.type_eval._eval_operators import TypeMapError
 from typemap.typing import (
     _All,
@@ -442,6 +443,11 @@ def test_getmember_01():
         eval_typing(GetMember[TA | TB, Literal[""]])
 
 
+def _instantiate(gc, *args):
+    tvs, f = get_args(gc)
+    return substitute(f, dict(zip(get_args(tvs), args, strict=True)))
+
+
 type OnlyIntToSet[T] = set[T] if IsAssignable[T, int] else T
 
 
@@ -456,8 +462,7 @@ def test_getmember_02():
 
     t = eval_typing(m.type)
     Vs = get_args(get_args(t)[0])
-    L = get_args(t)[1]
-    f = L(*Vs)
+    f = get_args(t)[1]
     assert (
         f
         == Callable[
@@ -480,8 +485,7 @@ def test_getmember_03():
 
     t = eval_typing(m.type)
     Vs = get_args(get_args(t)[0])
-    L = get_args(t)[1]
-    f = L(*Vs)
+    f = get_args(t)[1]
     assert (
         f
         == Callable[
@@ -530,7 +534,7 @@ def test_getmember_04():
         == _BoolLiteral[True]
     )
     assert (
-        eval_typing(mt.__args__[1].__args__[1](int))
+        eval_typing(_instantiate(mt.__args__[1], int))
         == Callable[
             Params[Param[Literal["self"], C], Param[Literal["x"], int]], int
         ]
@@ -554,18 +558,18 @@ def test_getmember_05():
     assert eval_typing(m.quals) == Literal["ClassVar"]
     assert eval_typing(m.definer) == A
 
-    ft = m.__args__[1].__args__[1]
+    gc = m.__args__[1]
     with _ensure_context():
         assert (
-            eval_typing(ft(A))
+            eval_typing(_instantiate(gc, A))
             == Callable[Params[Param[Literal["self"], A]], Never]
         )
         assert (
-            eval_typing(ft(B))
+            eval_typing(_instantiate(gc, B))
             == Callable[Params[Param[Literal["self"], B]], int]
         )
         assert (
-            eval_typing(ft(C))
+            eval_typing(_instantiate(gc, C))
             == Callable[Params[Param[Literal["self"], C]], str]
         )
 
@@ -589,24 +593,24 @@ def test_getmember_06():
     assert eval_typing(m.quals) == Literal["ClassVar"]
     assert eval_typing(m.definer) == A
 
-    ft = m.__args__[1].__args__[1]
+    gc = m.__args__[1]
     with _ensure_context():
         assert (
-            eval_typing(ft(A))
+            eval_typing(_instantiate(gc, A))
             == Callable[
                 Params[Param[Literal["self"], A], Param[Literal["x"], Never]],
                 None,
             ]
         )
         assert (
-            eval_typing(ft(B))
+            eval_typing(_instantiate(gc, B))
             == Callable[
                 Params[Param[Literal["self"], B], Param[Literal["x"], int]],
                 None,
             ]
         )
         assert (
-            eval_typing(ft(C))
+            eval_typing(_instantiate(gc, C))
             == Callable[
                 Params[Param[Literal["self"], C], Param[Literal["x"], str]],
                 None,
@@ -632,11 +636,18 @@ def test_getmember_07():
     assert eval_typing(m.quals) == Literal["ClassVar"]
     assert eval_typing(m.definer) == A
 
-    ft = m.__args__[1].__args__[1]
+    gc = m.__args__[1]
     with _ensure_context():
-        assert eval_typing(ft(A)) == classmethod[A, Params[()], Never]
-        assert eval_typing(ft(B)) == classmethod[B, Params[()], int]
-        assert eval_typing(ft(C)) == classmethod[C, Params[()], str]
+        assert (
+            eval_typing(_instantiate(gc, A))
+            == classmethod[A, Params[()], Never]
+        )
+        assert (
+            eval_typing(_instantiate(gc, B)) == classmethod[B, Params[()], int]
+        )
+        assert (
+            eval_typing(_instantiate(gc, C)) == classmethod[C, Params[()], str]
+        )
 
 
 def test_getmember_08():
@@ -659,18 +670,18 @@ def test_getmember_08():
     assert eval_typing(m.quals) == Literal["ClassVar"]
     assert eval_typing(m.definer) == A
 
-    ft = m.__args__[1].__args__[1]
+    gc = m.__args__[1]
     with _ensure_context():
         assert (
-            eval_typing(ft(A))
+            eval_typing(_instantiate(gc, A))
             == classmethod[A, Params[Param[Literal["x"], Never]], None]
         )
         assert (
-            eval_typing(ft(B))
+            eval_typing(_instantiate(gc, B))
             == classmethod[B, Params[Param[Literal["x"], int]], None]
         )
         assert (
-            eval_typing(ft(C))
+            eval_typing(_instantiate(gc, C))
             == classmethod[C, Params[Param[Literal["x"], str]], None]
         )
 
@@ -702,14 +713,14 @@ def test_getmember_09():
     assert eval_typing(m.quals) == Literal["ClassVar"]
     assert eval_typing(m.definer) == A
 
-    ft = m.__args__[1].__args__[1]
+    gc = m.__args__[1]
     with _ensure_context():
         assert (
-            eval_typing(ft(A))
+            eval_typing(_instantiate(gc, A))
             == Callable[Params[Param[Literal["self"], A]], tuple[()]]
         )
         assert (
-            eval_typing(ft(B))
+            eval_typing(_instantiate(gc, B))
             == Callable[Params[Param[Literal["self"], B]], tuple[bool, str]]
         )
 
@@ -742,11 +753,15 @@ def test_getmember_10():
     assert eval_typing(m.quals) == Literal["ClassVar"]
     assert eval_typing(m.definer) == A
 
-    ft = m.__args__[1].__args__[1]
+    gc = m.__args__[1]
     with _ensure_context():
-        assert eval_typing(ft(A)) == classmethod[A, Params[()], tuple[()]]
         assert (
-            eval_typing(ft(B)) == classmethod[B, Params[()], tuple[bool, str]]
+            eval_typing(_instantiate(gc, A))
+            == classmethod[A, Params[()], tuple[()]]
+        )
+        assert (
+            eval_typing(_instantiate(gc, B))
+            == classmethod[B, Params[()], tuple[bool, str]]
         )
 
 
@@ -1327,9 +1342,7 @@ def test_eval_getarg_custom_08():
 
 def test_eval_getargs_generic_callable_01():
     T = TypeVar("T")
-    t = GenericCallable[
-        tuple[T], lambda T: Callable[Params[Param[Literal["x"], T]], int]
-    ]
+    t = GenericCallable[tuple[T], Callable[Params[Param[Literal["x"], T]], int]]
     args = eval_typing(GetArgs[t, GenericCallable])
     assert args == tuple[tuple[T]]
 

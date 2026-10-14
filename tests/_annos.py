@@ -650,7 +650,7 @@ mod_y: dict[str, int if FLAG else str]
 # ---------------------------------------------------------------------------
 
 
-def fn124[T]() -> GenericCallable[tuple[T], lambda T: Callable[[T], T]]: ...
+def fn124[T]() -> GenericCallable[tuple[T], Callable[[T], T]]: ...
 
 
 def fn125() -> Annotated[int, lambda a, /, b=int, *c, d, e=str, **f: a]: ...
@@ -663,10 +663,10 @@ def fn127() -> Annotated[int, lambda a: [x for x in a if x]]: ...
 
 
 class LambdaAnnos[T]:
-    a: GenericCallable[tuple[T], lambda T: Callable[[T], T]]
+    a: Annotated[T, lambda T: Callable[[T], T]]
 
 
-type LambdaAlias[T] = GenericCallable[tuple[T], lambda T: Callable[[T], T]]
+type LambdaAlias[T] = Annotated[T, lambda T: Callable[[T], T]]
 
 
 # ---------------------------------------------------------------------------
