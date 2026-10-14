@@ -1078,6 +1078,14 @@ def _simplify(expr: ast.expr) -> ast.expr:
                     return _or(simp(test), simp(orelse))
                 if same(test, orelse):
                     return _and(simp(test), simp(body))
+                # `(a and b) or c`, after the `x if a and b else y` case
+                # below. Unlike in `b if a and b else c`, b is shared.
+                if (
+                    isinstance(test, ast.BoolOp)
+                    and isinstance(test.op, ast.And)
+                    and test.values[-1] is body
+                ):
+                    return _or(simp(test), simp(orelse))
         # `x if a and b else y`
         for test, body, orelse in options:
             if isinstance(body, ast.IfExp):
