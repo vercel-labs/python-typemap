@@ -22,6 +22,9 @@ def issubtype(lhs: typing.Any, rhs: typing.Any) -> bool:
     if rhs is None:
         rhs = type(None)
 
+    if lhs is typing.Any or rhs is typing.Any:
+        return True
+
     # Unions first
     if lhs is typing.Never:
         return True
@@ -97,8 +100,6 @@ def issubtype(lhs: typing.Any, rhs: typing.Any) -> bool:
     # TODO: tuple
 
     # TODO: Callable -- oh no, and callable needs
-
-    # TODO: Any
 
     # TODO: Annotated
 
