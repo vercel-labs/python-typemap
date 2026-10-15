@@ -485,20 +485,14 @@ def _eval_IsEquivalent(lhs, rhs, *, ctx):
     ]
 
 
-# XXX: A union is true if *any* of its elements is Literal[True], so
-# Literal[True, False] is true. (But bool is false, since it isn't
-# split up.) Is that what we want? The PEP specified the opposite,
-# when Bool existed.
+# A condition is true if it is equivalent to Literal[True]
 def _eval_bool_tp(tp, ctx):
     if _typing_inspect.is_generic_alias(tp) and tp.__origin__ is _BoolLiteral:
         return _BoolLiteral[bool(tp.__args__[0])]
     else:
         return _BoolLiteral[
-            any(
-                type_eval.issubtype(arg, typing.Literal[True])
-                and not type_eval.issubtype(arg, typing.Never)
-                for arg in _union_elems(tp, ctx)
-            )
+            type_eval.issubtype(tp, typing.Literal[True])
+            and type_eval.issubtype(typing.Literal[True], tp)
         ]
 
 
