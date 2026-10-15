@@ -7,6 +7,7 @@ See https://www.typescriptlang.org/docs/handbook/utility-types.html
 import textwrap
 from typing import (
     assert_type,
+    get_args,
     Literal,
     Never,
     NotRequired,
@@ -48,36 +49,24 @@ We present implementations of a selection of them::
 # Pick<T, Keys>
 # Constructs a type by picking the set of properties Keys from T.
 type Pick[T, Keys] = typing.NewProtocol[
-    *[
-        p
-        for p in typing.Iter[typing.Members[T]]
-        if typing.IsAssignable[p.name, Keys]
-    ]
+    *[p for p in typing.Members[T] if typing.IsAssignable[p.name, Keys]]
 ]
 
 # Omit<T, Keys>
 # Constructs a type by picking all properties from T and then removing Keys.
 # Note that unlike in TS, our Omit does not depend on Exclude.
 type Omit[T, Keys] = typing.NewProtocol[
-    *[
-        p
-        for p in typing.Iter[typing.Members[T]]
-        if not typing.IsAssignable[p.name, Keys]
-    ]
+    *[p for p in typing.Members[T] if not typing.IsAssignable[p.name, Keys]]
 ]
 
 # KeyOf[T]
 # Constructs a union of the names of every member of T.
-type KeyOf[T] = Union[*[p.name for p in typing.Iter[typing.Members[T]]]]
+type KeyOf[T] = Union[*[p.name for p in typing.Members[T]]]
 
 # Exclude<T, U>
 # Constructs a type by excluding from T all union members assignable to U.
 type Exclude[T, U] = Union[
-    *[
-        x
-        for x in typing.Iter[typing.FromUnion[T]]
-        if not typing.IsAssignable[x, U]
-    ]
+    *[x for x in typing.FromUnion[T] if not typing.IsAssignable[x, U]]
 ]
 
 # Extract<T, U>
@@ -85,7 +74,7 @@ type Exclude[T, U] = Union[
 type Extract[T, U] = Union[
     *[
         x
-        for x in typing.Iter[typing.FromUnion[T]]
+        for x in typing.FromUnion[T]
         # Just the inverse of Exclude, really
         if typing.IsAssignable[x, U]
     ]
@@ -94,10 +83,7 @@ type Extract[T, U] = Union[
 # Partial<T>
 # Constructs a type with all properties of T set to optional (T | None).
 type Partial[T] = typing.NewProtocol[
-    *[
-        typing.Member[p.name, p.type | None, p.quals]
-        for p in typing.Iter[typing.Attrs[T]]
-    ]
+    *[typing.Member[p.name, p.type | None, p.quals] for p in typing.Attrs[T]]
 ]
 
 # PartialTD<T>
@@ -106,7 +92,7 @@ type Partial[T] = typing.NewProtocol[
 type PartialTD[T] = typing.NewTypedDict[
     *[
         typing.Member[p.name, p.type, p.quals | Literal["NotRequired"]]
-        for p in typing.Iter[typing.Attrs[T]]
+        for p in typing.Attrs[T]
     ]
 ]
 # End PEP section: Utility types
@@ -220,7 +206,7 @@ class ChildTD(OptionalTD):
 def _get_quals(cls):
     """Return {name: quals} for all Attrs of cls."""
     result = {}
-    for p in eval_typing(typing.Iter[typing.Attrs[cls]]):
+    for p in get_args(eval_typing(typing.Attrs[cls])):
         name = eval_typing(p.name).__args__[0]
         quals = eval_typing(p.quals)
         result[name] = quals

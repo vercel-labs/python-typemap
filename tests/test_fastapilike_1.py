@@ -13,7 +13,6 @@ from typing import Annotated, Callable, Literal, Never, Union, Self
 from typemap.type_eval import eval_typing
 from typemap_extensions import (
     NewProtocol,
-    Iter,
     Attrs,
     IsAssignable,
     GetAnnotations,
@@ -66,7 +65,7 @@ type InitFnType[T] = Member[
                     ]
                     else Never,
                 ]
-                for p in Iter[Attrs[T]]
+                for p in Attrs[T]
             ],
         ],
         None,
@@ -78,13 +77,13 @@ type AddInit[T] = NewProtocol[
     InitFnType[T],
     # TODO: mypy rejects this -- should it work?
     # *Members[T],
-    *[t for t in Iter[Members[T]]],
+    *[t for t in Members[T]],
 ]
 
 # Strip `| None` from a type by iterating over its union components
 # and filtering
 type NotOptional[T] = Union[
-    *[x for x in Iter[FromUnion[T]] if not IsAssignable[x, None]]
+    *[x for x in FromUnion[T] if not IsAssignable[x, None]]
 ]
 
 # Adjust an attribute type for use in Public below by dropping | None for
@@ -101,7 +100,7 @@ type FixPublicType[T] = DropAnnotations[
 type Public[T] = NewProtocol[
     *[
         Member[p.name, FixPublicType[p.type], p.quals]
-        for p in Iter[Attrs[T]]
+        for p in Attrs[T]
         if not IsAssignable[Literal[PropQuals.HIDDEN], GetAnnotations[p.type]]
     ]
 ]
@@ -110,7 +109,7 @@ type Public[T] = NewProtocol[
 type Create[T] = NewProtocol[
     *[
         Member[p.name, p.type, p.quals]
-        for p in Iter[Attrs[T]]
+        for p in Attrs[T]
         if not IsAssignable[Literal[PropQuals.PRIMARY], GetAnnotations[p.type]]
     ]
 ]
@@ -125,7 +124,7 @@ type Update[T] = NewProtocol[
             HasDefault[DropAnnotations[p.type] | None, None],
             p.quals,
         ]
-        for p in Iter[Attrs[T]]
+        for p in Attrs[T]
         if not IsAssignable[Literal[PropQuals.PRIMARY], GetAnnotations[p.type]]
     ]
 ]

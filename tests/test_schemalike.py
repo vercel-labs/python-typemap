@@ -5,7 +5,6 @@ from typing import Callable, Literal
 from typemap.type_eval import eval_typing
 from typemap_extensions import (
     NewProtocol,
-    Iter,
     Attrs,
     Member,
     NamedParam,
@@ -42,7 +41,7 @@ class Property:
 
 
 type Schemaify[T] = NewProtocol[
-    *[p for p in Iter[Attrs[T]]],
+    *[p for p in Attrs[T]],
     *[
         Member[
             Concat[Literal["get_"], p.name],
@@ -55,7 +54,7 @@ type Schemaify[T] = NewProtocol[
             ],
             Literal["ClassVar"],
         ]
-        for p in Iter[Attrs[T]]
+        for p in Attrs[T]
     ],
 ]
 

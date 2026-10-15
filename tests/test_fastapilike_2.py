@@ -36,11 +36,7 @@ type GetFieldItem[T, K] = typing.GetMemberType[
 # Strip `| None` from a type by iterating over its union components
 # and filtering
 type NotOptional[T] = Union[
-    *[
-        x
-        for x in typing.Iter[typing.FromUnion[T]]
-        if not typing.IsAssignable[x, None]
-    ]
+    *[x for x in typing.FromUnion[T] if not typing.IsAssignable[x, None]]
 ]
 
 # Adjust an attribute type for use in Public below by dropping | None for
@@ -63,7 +59,7 @@ type Public[T] = typing.NewProtocol[
             FixPublicType[p.type, p.init],
             p.quals,
         ]
-        for p in typing.Iter[typing.Attrs[T]]
+        for p in typing.Attrs[T]
         if not typing.IsAssignable[
             Literal[True], GetFieldItem[p.init, Literal["hidden"]]
         ]
@@ -94,7 +90,7 @@ type Create[T] = typing.NewProtocol[
             p.quals,
             GetDefault[p.init],
         ]
-        for p in typing.Iter[typing.Attrs[T]]
+        for p in typing.Attrs[T]
         if not typing.IsAssignable[
             Literal[True],
             GetFieldItem[p.init, Literal["primary_key"]],
@@ -128,7 +124,7 @@ type Update[T] = typing.NewProtocol[
             p.quals,
             Literal[None],
         ]
-        for p in typing.Iter[typing.Attrs[T]]
+        for p in typing.Attrs[T]
         if not typing.IsAssignable[
             Literal[True],
             GetFieldItem[p.init, Literal["primary_key"]],
@@ -154,7 +150,7 @@ type InitFnType[T] = typing.Member[
                     # directly as D.
                     GetDefault[p.init],
                 ]
-                for p in typing.Iter[typing.Attrs[T]]
+                for p in typing.Attrs[T]
             ],
         ],
         None,
@@ -163,7 +159,7 @@ type InitFnType[T] = typing.Member[
 ]
 type AddInit[T] = typing.NewProtocol[
     InitFnType[T],
-    *[x for x in typing.Iter[typing.Members[T]]],
+    *[x for x in typing.Members[T]],
 ]
 
 

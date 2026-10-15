@@ -44,7 +44,6 @@ from typemap.typing import (
 
 from typemap_extensions import (
     Attrs,
-    Bool,
     FromUnion,
     GenericCallable,
     GetArg,
@@ -54,7 +53,6 @@ from typemap_extensions import (
     GetSpecialAttr,
     GetAnnotations,
     IsAssignable,
-    Iter,
     Length,
     IsEquivalent,
     Member,
@@ -88,8 +86,8 @@ class F_int(F[int]):
 
 
 type ConcatTuples[A, B] = tuple[
-    *[x for x in Iter[A]],
-    *[x for x in Iter[B]],
+    *[x for x in A],
+    *[x for x in B],
 ]
 
 type MapRecursive[A] = NewProtocol[
@@ -99,7 +97,7 @@ type MapRecursive[A] = NewProtocol[
             if not IsAssignable[p.type, A]
             else Member[p.name, OrGotcha[MapRecursive[A]]]
         )
-        for p in Iter[tuple[*Attrs[A], *Attrs[F_int]]]
+        for p in tuple[*Attrs[A], *Attrs[F_int]]
     ],
     Member[Literal["control"], float],
 ]
@@ -696,7 +694,7 @@ def test_getmember_09():
         ) -> tuple[
             *[
                 m.type
-                for m in Iter[Attrs[T]]
+                for m in Attrs[T]
                 if not IsAssignable[
                     Slice[m.name, None, Literal[1]], Literal["_"]
                 ]
@@ -736,7 +734,7 @@ def test_getmember_10():
         ) -> tuple[
             *[
                 m.type
-                for m in Iter[Attrs[T]]
+                for m in Attrs[T]
                 if not IsAssignable[
                     Slice[m.name, None, Literal[1]], Literal["_"]
                 ]
@@ -895,12 +893,12 @@ def test_eval_getarg_callable_02():
         eval_typing(GetArg[gc, GenericCallable, Literal[1]])
 
 
-type IndirectProtocol[T] = NewProtocol[*[m for m in Iter[Members[T]]],]
+type IndirectProtocol[T] = NewProtocol[*[m for m in Members[T]],]
 type GetMethodLike[T, Name] = GetArg[
     tuple[
         *[
             p.type
-            for p in Iter[Members[T]]
+            for p in Members[T]
             if (
                 IsAssignable[p.type, Callable]
                 or IsAssignable[p.type, staticmethod]
@@ -1551,21 +1549,20 @@ def test_matches_03():
     assert d == _BoolLiteral[False]
 
 
+type TupleElems[T] = tuple[*[x for x in T]]
+
+
 def test_eval_iter_01():
-    d = eval_typing(Iter[tuple[int, str]])
-    assert tuple(d) == (int, str)
+    assert eval_typing(TupleElems[tuple[int, str]]) == tuple[int, str]
+    assert eval_typing(TupleElems[Tuple[int, str]]) == tuple[int, str]
+    assert eval_typing(TupleElems[tuple[(int, str)]]) == tuple[int, str]
+    assert eval_typing(TupleElems[tuple[()]]) == tuple[()]
 
-    d = eval_typing(Iter[Tuple[int, str]])
-    assert tuple(d) == (int, str)
-
-    d = eval_typing(Iter[tuple[(int, str)]])
-    assert tuple(d) == (int, str)
-
-    d = eval_typing(Iter[tuple[()]])
-    assert tuple(d) == ()
+    with pytest.raises(TypeError, match="iterate over tuples"):
+        eval_typing(TupleElems[int])
 
 
-type DuplicateTuple[T] = tuple[*[x for x in Iter[T]], *[x for x in Iter[T]]]
+type DuplicateTuple[T] = tuple[*[x for x in T], *[x for x in T]]
 type ConcatTupleWithSelf[T] = ConcatTuples[T, T]
 
 
@@ -1581,19 +1578,15 @@ def test_eval_iter_02():
     assert d == tuple[int, str, int, str]
 
 
-type OptTuple[T] = tuple[*[X | None for X in Iter[T]]]
-type IntsOnly[T] = tuple[*[X for X in Iter[T] if IsAssignable[X, int]]]
+type OptTuple[T] = tuple[*[X | None for X in T]]
+type IntsOnly[T] = tuple[*[X for X in T if IsAssignable[X, int]]]
 type Pair[T] = tuple[T, T]
-type Pairs[T] = tuple[*[Unpack[Pair[X]] for X in Iter[T]]]
+type Pairs[T] = tuple[*[Unpack[Pair[X]] for X in T]]
 type AnyInt[T] = (
-    Literal[True]
-    if any(IsAssignable[X, int] for X in Iter[T])
-    else Literal[False]
+    Literal[True] if any(IsAssignable[X, int] for X in T) else Literal[False]
 )
 type AllInt[T] = (
-    Literal[True]
-    if all(IsAssignable[X, int] for X in Iter[T])
-    else Literal[False]
+    Literal[True] if all(IsAssignable[X, int] for X in T) else Literal[False]
 )
 
 
@@ -1661,88 +1654,88 @@ type NotLiteralGenericToLiteral[T] = Literal[True] if not T else Literal[False]
 
 
 def test_eval_bool_01():
-    d = eval_typing(Bool[Literal[True]])
+    d = eval_typing(LiteralGenericToLiteral[Literal[True]])
     assert d == _BoolLiteral[True]
 
-    d = eval_typing(Bool[Literal[False]])
+    d = eval_typing(LiteralGenericToLiteral[Literal[False]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[Literal[1]])
+    d = eval_typing(LiteralGenericToLiteral[Literal[1]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[Literal[0]])
+    d = eval_typing(LiteralGenericToLiteral[Literal[0]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[Literal["true"]])
+    d = eval_typing(LiteralGenericToLiteral[Literal["true"]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[Literal["false"]])
+    d = eval_typing(LiteralGenericToLiteral[Literal["false"]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[_BoolLiteral[True]])
+    d = eval_typing(LiteralGenericToLiteral[_BoolLiteral[True]])
     assert d == _BoolLiteral[True]
 
-    d = eval_typing(Bool[_BoolLiteral[False]])
+    d = eval_typing(LiteralGenericToLiteral[_BoolLiteral[False]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[Never])
+    d = eval_typing(LiteralGenericToLiteral[Never])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[int])
+    d = eval_typing(LiteralGenericToLiteral[int])
     assert d == _BoolLiteral[False]
 
     class C:
         pass
 
-    d = eval_typing(Bool[C])
+    d = eval_typing(LiteralGenericToLiteral[C])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(Bool[True])
+    d = eval_typing(LiteralGenericToLiteral[True])
     assert d == _BoolLiteral[True]
 
-    d = eval_typing(Bool[False])
+    d = eval_typing(LiteralGenericToLiteral[False])
     assert d == _BoolLiteral[False]
 
 
 def test_eval_bool_02():
-    d = eval_typing(Bool[Literal[True] | Literal[False]])
+    d = eval_typing(LiteralGenericToLiteral[Literal[True] | Literal[False]])
     assert d == _BoolLiteral[True]
-    d = eval_typing(Bool[Literal[False] | Literal[True]])
+    d = eval_typing(LiteralGenericToLiteral[Literal[False] | Literal[True]])
     assert d == _BoolLiteral[True]
-    d = eval_typing(Bool[Literal[True] | Never])
+    d = eval_typing(LiteralGenericToLiteral[Literal[True] | Never])
     assert d == _BoolLiteral[True]
-    d = eval_typing(Bool[Never | Literal[True]])
+    d = eval_typing(LiteralGenericToLiteral[Never | Literal[True]])
     assert d == _BoolLiteral[True]
-    d = eval_typing(Bool[Literal[False] | Never])
+    d = eval_typing(LiteralGenericToLiteral[Literal[False] | Never])
     assert d == _BoolLiteral[False]
-    d = eval_typing(Bool[Never | Literal[False]])
+    d = eval_typing(LiteralGenericToLiteral[Never | Literal[False]])
     assert d == _BoolLiteral[False]
-    d = eval_typing(Bool[Literal[True] | int])
+    d = eval_typing(LiteralGenericToLiteral[Literal[True] | int])
     assert d == _BoolLiteral[True]
-    d = eval_typing(Bool[int | Literal[True]])
+    d = eval_typing(LiteralGenericToLiteral[int | Literal[True]])
     assert d == _BoolLiteral[True]
-    d = eval_typing(Bool[Literal[False] | int])
+    d = eval_typing(LiteralGenericToLiteral[Literal[False] | int])
     assert d == _BoolLiteral[False]
-    d = eval_typing(Bool[int | Literal[False]])
+    d = eval_typing(LiteralGenericToLiteral[int | Literal[False]])
     assert d == _BoolLiteral[False]
-    d = eval_typing(Bool[int | str])
+    d = eval_typing(LiteralGenericToLiteral[int | str])
     assert d == _BoolLiteral[False]
 
 
 def test_eval_bool_03():
-    d = eval_typing(NotLiteralGeneric[Bool[Literal[True]]])
+    d = eval_typing(NotLiteralGeneric[Literal[True]])
     assert d == _BoolLiteral[False]
 
-    d = eval_typing(NotLiteralGeneric[Bool[Literal[False]]])
+    d = eval_typing(NotLiteralGeneric[Literal[False]])
     assert d == _BoolLiteral[True]
 
 
-type NestedBool0[T] = Bool[T]
-type NestedBool1[T] = NestedBool0[Bool[T]]
-type NestedBool2[T] = NestedBool1[Bool[T]]
-type NestedBool3[T] = NestedBool2[Bool[T]]
-type NestedBool4[T] = NestedBool3[Bool[T]]
-type NestedBool5[T] = NestedBool4[Bool[T]]
+type NestedBool0[T] = LiteralGenericToLiteral[T]
+type NestedBool1[T] = NestedBool0[LiteralGenericToLiteral[T]]
+type NestedBool2[T] = NestedBool1[LiteralGenericToLiteral[T]]
+type NestedBool3[T] = NestedBool2[LiteralGenericToLiteral[T]]
+type NestedBool4[T] = NestedBool3[LiteralGenericToLiteral[T]]
+type NestedBool5[T] = NestedBool4[LiteralGenericToLiteral[T]]
 
 
 def test_eval_bool_04():
@@ -1753,8 +1746,8 @@ def test_eval_bool_04():
     assert d == _BoolLiteral[False]
 
 
-type IsIntBool[T] = Bool[IsAssignable[T, int]]
-type IsIntLiteral[T] = Literal[True] if Bool[IsIntBool[T]] else Literal[False]
+type IsIntBool[T] = IsAssignable[T, int]
+type IsIntLiteral[T] = Literal[True] if IsIntBool[T] else Literal[False]
 
 
 def test_eval_bool_05():
@@ -1857,9 +1850,7 @@ type SetAttrs[C] = tuple[
         ],
     ]
 ]
-type SetAttrsComp[C] = tuple[
-    *[Member[m.name, set[m.type]] for m in Iter[Attrs[C]]]
-]
+type SetAttrsComp[C] = tuple[*[Member[m.name, set[m.type]] for m in Attrs[C]]]
 
 
 def test_eval_unpack_map_01():
@@ -2361,7 +2352,7 @@ def test_update_class_members_01():
 type MembersExceptInitSubclass[T] = tuple[
     *[
         m
-        for m in Iter[Members[T]]
+        for m in Members[T]
         if not IsAssignable[m.name, Literal["__init_subclass__"]]
     ]
 ]
@@ -2446,7 +2437,7 @@ def test_update_class_members_02():
 
 
 type AttrsAsSets[T] = UpdateClass[
-    *[Member[m.name, set[m.type]] for m in Iter[Attrs[T]]]
+    *[Member[m.name, set[m.type]] for m in Attrs[T]]
 ]
 
 
@@ -2876,9 +2867,7 @@ def test_update_class_inheritance_02():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[
-            *[Member[m.name, list[m.type]] for m in Iter[Attrs[T]]]
-        ]:
+        ) -> UpdateClass[*[Member[m.name, list[m.type]] for m in Attrs[T]]]:
             super().__init_subclass__()
 
     class C:
@@ -2886,9 +2875,7 @@ def test_update_class_inheritance_02():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[
-            *[Member[m.name, tuple[m.type]] for m in Iter[Attrs[T]]]
-        ]:
+        ) -> UpdateClass[*[Member[m.name, tuple[m.type]] for m in Attrs[T]]]:
             super().__init_subclass__()
 
     class D(B, C):

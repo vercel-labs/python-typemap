@@ -9,10 +9,8 @@ from typemap.typing import _BoolLiteral
 from typemap_extensions import (
     Attrs,
     BaseTypedDict,
-    Bool,
     GetArg,
     IsAssignable,
-    Iter,
     IsEquivalent,
     Member,
     NewProtocol,
@@ -52,7 +50,7 @@ type CombineVarArgs[Ls: tuple[VarArg], Rs: tuple[VarArg]] = tuple[
             (
                 VarArgType[x]
                 if not any(  # Unique to Ls
-                    IsEquivalent[VarArgName[x], VarArgName[y]] for y in Iter[Rs]
+                    IsEquivalent[VarArgName[x], VarArgName[y]] for y in Rs
                 )
                 else GetArg[  # Common to both Ls and Rs
                     tuple[
@@ -71,7 +69,7 @@ type CombineVarArgs[Ls: tuple[VarArg], Rs: tuple[VarArg]] = tuple[
                                     VarArgType[y],
                                 ]
                             )
-                            for y in Iter[Rs]
+                            for y in Rs
                             if IsEquivalent[VarArgName[x], VarArgName[y]]
                         ]
                     ],
@@ -80,13 +78,13 @@ type CombineVarArgs[Ls: tuple[VarArg], Rs: tuple[VarArg]] = tuple[
                 ]
             ),
         ]
-        for x in Iter[Ls]
+        for x in Ls
     ],
     *[  # Unique to Rs
         x
-        for x in Iter[Rs]
+        for x in Rs
         if not any(  # Unique to Rs
-            IsEquivalent[VarArgName[x], VarArgName[y]] for y in Iter[Ls]
+            IsEquivalent[VarArgName[x], VarArgName[y]] for y in Ls
         )
     ],
 ]
@@ -135,16 +133,16 @@ def test_astlike_1_combine_varargs_02():
 
 type IsNumericAssignable[L, R] = (
     IsAssignable[R, L]
-    or Bool[IsEquivalent[L, float] and Bool[IsFloat[R]]]
-    or Bool[IsEquivalent[L, complex] and Bool[IsComplex[R]]]
+    or (IsEquivalent[L, float] and IsFloat[R])
+    or (IsEquivalent[L, complex] and IsComplex[R])
 )
 type VarIsPresent[V: VarArg, K: BaseTypedDict] = any(
     IsEquivalent[VarArgName[V], x.name]
-    and Bool[IsNumericAssignable[VarArgType[V], x.type]]
-    for x in Iter[Attrs[K]]
+    and IsNumericAssignable[VarArgType[V], x.type]
+    for x in Attrs[K]
 )
 type AllVarsPresent[Vs: tuple[VarArg, ...], K: BaseTypedDict] = all(
-    Bool[VarIsPresent[v, K]] for v in Iter[Vs]
+    VarIsPresent[v, K] for v in Vs
 )
 
 
@@ -202,23 +200,23 @@ def test_astlike_1_all_vars_present_05():
 
 
 type IsIntegral[T] = IsAssignable[T, int]
-type IsFloat[T] = Bool[IsIntegral[T]] or IsAssignable[T, float]
-type IsComplex[T] = Bool[IsFloat[T]] or IsAssignable[T, complex]
+type IsFloat[T] = IsIntegral[T] or IsAssignable[T, float]
+type IsComplex[T] = IsFloat[T] or IsAssignable[T, complex]
 
 type SimpleNumericOp[L, R, OpName: str] = (
     int
-    if Bool[IsIntegral[L]] and Bool[IsIntegral[R]]
+    if IsIntegral[L] and IsIntegral[R]
     else float
-    if Bool[IsFloat[L]] and Bool[IsFloat[R]]
+    if IsFloat[L] and IsFloat[R]
     else RaiseError[
         typing.Literal["Operation only supports int or float"], OpName
     ]
 )
 type ComplexNumericOp[L, R, OpName] = (
     SimpleNumericOp[L, R, OpName]
-    if Bool[IsFloat[L]] and Bool[IsFloat[R]]
+    if IsFloat[L] and IsFloat[R]
     else complex
-    if Bool[IsComplex[L]] and Bool[IsComplex[R]]
+    if IsComplex[L] and IsComplex[R]
     else RaiseError[
         typing.Literal["Operation only supports int, float, or complex"], OpName
     ]
@@ -380,7 +378,7 @@ def test_astlike_1_variable_02():
 
 def eval[T, Vs: tuple[VarArg, ...], K: BaseTypedDict](
     self: Node[T, Vs], **kwargs: typing.Unpack[K]
-) -> T if Bool[AllVarsPresent[Vs, K]] else typing.Never: ...
+) -> T if AllVarsPresent[Vs, K] else typing.Never: ...
 
 
 def test_astlike_1_eval_01():

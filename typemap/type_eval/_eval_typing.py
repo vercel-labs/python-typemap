@@ -1,4 +1,3 @@
-import collections.abc
 import contextlib
 import contextvars
 import dataclasses
@@ -260,10 +259,7 @@ def _eval_types(obj: typing.Any, ctx: EvalContext):
 
         evaled = nt._BoolLiteral[evaled]
 
-    # Don't cache iterators as they are stateful and can only be consumed once.
-    # This is important for Iter results that may be used multiple times.
-    if not isinstance(evaled, collections.abc.Iterator):
-        ctx.resolved[obj] = evaled
+    ctx.resolved[obj] = evaled
     return evaled
 
 

@@ -48,9 +48,9 @@ until one of them is empty.
 
 type Broadcast[T, S] = (
     S
-    if typing.Bool[Empty[T]]
+    if Empty[T]
     else T
-    if typing.Bool[Empty[S]]
+    if Empty[S]
     else tuple[
         *Broadcast[DropLast[T], DropLast[S]],
         MergeOne[Last[T], Last[S]],

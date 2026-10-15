@@ -340,19 +340,11 @@ class RaiseError[S: str, *Ts]:
 ##################################################################
 
 
-class Iter[T]:
-    pass
-
-
 class IsAssignable[Lhs, Rhs]:
     pass
 
 
 class IsEquivalent[Lhs, Rhs]:
-    pass
-
-
-class Bool[T]:
     pass
 
 
@@ -389,7 +381,7 @@ class _All[T]:
 
 
 class _Cond[B, T, F]:
-    """_Cond[B, T, F]: Equivalent to ``T if Bool[B] else F``.
+    """_Cond[B, T, F]: Equivalent to ``T if B else F``.
 
     Only the selected branch is evaluated.
     """
@@ -398,7 +390,7 @@ class _Cond[B, T, F]:
 
 
 class _UnpackMap[Ts, T, R, C = Literal[True]]:
-    """_UnpackMap[Ts, T, R, C]: Equivalent to ``*[R for T in Iter[Ts] if C]``.
+    """_UnpackMap[Ts, T, R, C]: Equivalent to ``*[R for T in Ts if C]``.
 
     T must be a TypeVar, which is bound to each element of Ts in turn
     while evaluating R and C.

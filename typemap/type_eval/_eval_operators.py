@@ -22,7 +22,6 @@ from typemap.type_eval._eval_typing import (
 )
 from typemap.typing import (
     Attrs,
-    Bool,
     Capitalize,
     _Cond,
     DropAnnotations,
@@ -38,7 +37,6 @@ from typemap.typing import (
     InitField,
     IsAssignable,
     IsEquivalent,
-    Iter,
     Length,
     Lowercase,
     Member,
@@ -445,11 +443,9 @@ def _lift_over_unions(func):
 ##################################################################
 
 
-@type_eval.register_evaluator(Iter)
-@_lift_evaluated
-def _eval_Iter(tp, *, ctx):
+def _iter_types(tp, ctx):
     # The unbounded part of a tuple is produced as Unpack[tuple[X, ...]]
-    tp = _eval_types(tp, ctx)
+    tp = _unwrap_anno(_eval_types(tp, ctx))
     if _typing_inspect.is_unbounded_tuple(tp):
         return iter((typing.Unpack[tp],))
     elif _typing_inspect.is_generic_alias(tp) and tp.__origin__ is tuple:
@@ -459,7 +455,7 @@ def _eval_Iter(tp, *, ctx):
         # We *definitely* should return [] for Never
         # Maybe we should lift over unions and return the union of
         # each tuples position...
-        raise TypeError(f"Invalid type argument to Iter: {tp} is not a tuple")
+        raise TypeError(f"Can only iterate over tuples: {tp} is not a tuple")
 
 
 def _unbounded_as_one(tps):
@@ -489,6 +485,10 @@ def _eval_IsEquivalent(lhs, rhs, *, ctx):
     ]
 
 
+# XXX: A union is true if *any* of its elements is Literal[True], so
+# Literal[True, False] is true. (But bool is false, since it isn't
+# split up.) Is that what we want? The PEP specified the opposite,
+# when Bool existed.
 def _eval_bool_tp(tp, ctx):
     if _typing_inspect.is_generic_alias(tp) and tp.__origin__ is _BoolLiteral:
         return _BoolLiteral[bool(tp.__args__[0])]
@@ -500,12 +500,6 @@ def _eval_bool_tp(tp, ctx):
                 for arg in _union_elems(tp, ctx)
             )
         ]
-
-
-@type_eval.register_evaluator(Bool)
-@_lift_evaluated
-def _eval_Bool(tp, *, ctx):
-    return _eval_bool_tp(tp, ctx)
 
 
 def _eval_test(tp, ctx) -> bool:
@@ -553,7 +547,7 @@ def _eval_UnpackMap(tps, tv, tres, tcond=typing.Literal[True], *, ctx):
         raise TypeError(f"_UnpackMap variable must be a TypeVar, got {tv}")
 
     results = []
-    for tp in _eval_Iter(tps, ctx=ctx):
+    for tp in _iter_types(tps, ctx):
         unbounded = _typing_inspect.is_unbounded_tuple_unpack(tp)
         if unbounded:
             tp = typing.get_args(typing.get_args(tp)[0])[0]

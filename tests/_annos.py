@@ -38,7 +38,7 @@ from typing import (
     runtime_checkable,
 )
 
-from typemap.typing import GenericCallable, IsAssignable, Iter, Member
+from typemap.typing import GenericCallable, IsAssignable, Member
 
 
 # ---------------------------------------------------------------------------
@@ -585,21 +585,21 @@ def fn113[T](
 # Module-level functions — inlined comprehension bytecode (Pattern B)
 
 
-def fn114[T]() -> tuple[*[x for x in Iter[T]]]: ...
+def fn114[T]() -> tuple[*[x for x in T]]: ...
 
 
-def fn115[T]() -> tuple[*[m.name for m in Iter[T]]]: ...
+def fn115[T]() -> tuple[*[m.name for m in T]]: ...
 
 
-def fn116[T]() -> tuple[*[Member[m.name, m.type] for m in Iter[T]]]: ...
+def fn116[T]() -> tuple[*[Member[m.name, m.type] for m in T]]: ...
 
 
-def fn117[T]() -> tuple[*[m for m in Iter[T] if IsAssignable[m.type, int]]]: ...
+def fn117[T]() -> tuple[*[m for m in T if IsAssignable[m.type, int]]]: ...
 
 
 def fn118[A, B]() -> tuple[
-    *[x for x in Iter[A]],
-    *[y for y in Iter[B]],
+    *[x for x in A],
+    *[y for y in B],
 ]: ...
 
 
@@ -607,13 +607,13 @@ def fn118[A, B]() -> tuple[
 
 
 class CompNode[T]:
-    def fn119(self) -> tuple[*[x for x in Iter[T]]]: ...
+    def fn119(self) -> tuple[*[x for x in T]]: ...
 
-    def fn120(self) -> tuple[*[Member[m.name, m.type] for m in Iter[T]]]: ...
+    def fn120(self) -> tuple[*[Member[m.name, m.type] for m in T]]: ...
 
     def fn121(
         self,
-    ) -> tuple[*[m for m in Iter[T] if IsAssignable[m.type, int]]]: ...
+    ) -> tuple[*[m for m in T if IsAssignable[m.type, int]]]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -674,10 +674,10 @@ type LambdaAlias[T] = Annotated[T, lambda T: Callable[[T], T]]
 # ---------------------------------------------------------------------------
 
 
-def fn128[T]() -> tuple[*[x for x in Iter[T] if x]]: ...
+def fn128[T]() -> tuple[*[x for x in T if x]]: ...
 
 
-def fn129[T]() -> tuple[*[x for x in Iter[T] if not x]]: ...
+def fn129[T]() -> tuple[*[x for x in T if not x]]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -708,10 +708,10 @@ type KeywordAlias[T] = Annotated[int, len(key=int if T else str)]
 # ---------------------------------------------------------------------------
 
 
-def fn133[T]() -> tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]: ...
+def fn133[T]() -> tuple[*[Unpack[tuple[X, X]] for X in T]]: ...
 
 
-def fn134[T]() -> tuple[*[x for x in Iter[T] if IsAssignable[x, x]]]: ...
+def fn134[T]() -> tuple[*[x for x in T if IsAssignable[x, x]]]: ...
 
 
 def fn135() -> Annotated[int, lambda a, b: a[b]]: ...
@@ -724,12 +724,12 @@ def fn137() -> Annotated[int, lambda a, b: len(a, b, [a for a in b])]: ...
 
 
 class FusedLoads[T]:
-    a: tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]
+    a: tuple[*[Unpack[tuple[X, X]] for X in T]]
 
-    def fn138(self) -> tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]: ...
+    def fn138(self) -> tuple[*[Unpack[tuple[X, X]] for X in T]]: ...
 
 
-type FusedLoadsAlias[T] = tuple[*[Unpack[tuple[X, X]] for X in Iter[T]]]
+type FusedLoadsAlias[T] = tuple[*[Unpack[tuple[X, X]] for X in T]]
 
 
 # ---------------------------------------------------------------------------
@@ -751,14 +751,14 @@ def fn141[A, B, C]() -> Annotated[int, A << B >> C & A ^ B | C]: ...
 def fn142[A, B, T]() -> Annotated[int, A + (B if T else A), int | A + B]: ...
 
 
-def fn143[T]() -> tuple[*[x + x for x in Iter[T]]]: ...
+def fn143[T]() -> tuple[*[x + x for x in T]]: ...
 
 
 class BinOps[A, B]:
     a: Annotated[int, A + B]
     b: Annotated[int, (A if B else int) * A]
 
-    def fn144(self) -> tuple[*[x + A for x in Iter[B]]]: ...
+    def fn144(self) -> tuple[*[x + A for x in B]]: ...
 
 
 type BinOpsAlias[A, B] = Annotated[int, A + B, A ^ B]
@@ -781,7 +781,7 @@ def fn147[A, B, C]() -> Annotated[int, C[A:B, C], C[:, A], C[A, ::B]]: ...
 def fn148[C]() -> Annotated[int, C[:], C[1:2], C[-1:], C[::-1], C[1:2, 3]]: ...
 
 
-def fn149[T]() -> tuple[*[x[1:] for x in Iter[T]]]: ...
+def fn149[T]() -> tuple[*[x[1:] for x in T]]: ...
 
 
 class Slices[A, B]:
@@ -798,33 +798,33 @@ type SlicesAlias[A, B] = Annotated[int, A[B:], A[:B:A], A[1:]]
 # ---------------------------------------------------------------------------
 
 
-def fn151[T]() -> tuple[*[x[y] for x in Iter[T] for y in x]]: ...
+def fn151[T]() -> tuple[*[x[y] for x in T for y in x]]: ...
 
 
 def fn152[A]() -> tuple[
     *[
         dict[a, b]
-        for a in Iter[A]
+        for a in A
         if not IsAssignable[a, bool]
-        for b in Iter[tuple[a, None]]
+        for b in tuple[a, None]
         if IsAssignable[a, int] and IsAssignable[b, None]
     ]
 ]: ...
 
 
-def fn153[T]() -> tuple[*[list[t] for t in Iter[T] for t in Iter[t]]]: ...
+def fn153[T]() -> tuple[*[list[t] for t in T for t in t]]: ...
 
 
 def fn154[A, B, C]() -> tuple[
-    *[tuple[a, b, c] for a in Iter[A] for b in Iter[B] if b for c in Iter[C]]
+    *[tuple[a, b, c] for a in A for b in B if b for c in C]
 ]: ...
 
 
-def fn155[T]() -> tuple[*[[y for y in x] for x in Iter[T] for z in x]]: ...
+def fn155[T]() -> tuple[*[[y for y in x] for x in T for z in x]]: ...
 
 
 def fn156[As, Bs]() -> Annotated[
-    int, any(IsAssignable[a, b] for a in Iter[As] for b in Iter[Bs])
+    int, any(IsAssignable[a, b] for a in As for b in Bs)
 ]: ...
 
 
@@ -832,26 +832,26 @@ def fn157() -> Annotated[int, lambda a: [x[y] for x in a for y in x]]: ...
 
 
 class MultiFor[A, B]:
-    a: tuple[*[x[y] for x in Iter[A] for y in x]]
+    a: tuple[*[x[y] for x in A for y in x]]
     b: Annotated[
         int,
         all(
             IsAssignable[a, b]
-            for a in Iter[A]
+            for a in A
             if IsAssignable[a, int]
-            for b in Iter[tuple[int, a]]
+            for b in tuple[int, a]
         ),
     ]
 
-    def fn158(self) -> tuple[*[x[y] for x in Iter[A] for y in x]]: ...
+    def fn158(self) -> tuple[*[x[y] for x in A for y in x]]: ...
 
 
 type MultiForAlias[A, B] = tuple[
-    *[a for a in Iter[A] if IsAssignable[a, int] for b in Iter[tuple[a]]]
+    *[a for a in A if IsAssignable[a, int] for b in tuple[a]]
 ]
 
 
-def fn159[T]() -> tuple[*[x + y for x in Iter[T] for y in x]]: ...
+def fn159[T]() -> tuple[*[x + y for x in T for y in x]]: ...
 
 
 # ---------------------------------------------------------------------------

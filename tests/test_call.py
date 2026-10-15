@@ -8,7 +8,6 @@ from typemap_extensions import (
     BaseTypedDict,
     NewProtocol,
     Member,
-    Iter,
 )
 
 from typemap.type_eval import format_helper
@@ -17,7 +16,7 @@ from typemap.type_eval import format_helper
 def func[*T, K: BaseTypedDict](
     *args: Unpack[T],
     **kwargs: Unpack[K],
-) -> NewProtocol[*[Member[c.name, int] for c in Iter[Attrs[K]]]]:
+) -> NewProtocol[*[Member[c.name, int] for c in Attrs[K]]]:
     raise NotImplementedError
 
 
