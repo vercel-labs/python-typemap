@@ -1699,9 +1699,9 @@ def test_eval_bool_01():
 
 def test_eval_bool_02():
     d = eval_typing(LiteralGenericToLiteral[Literal[True] | Literal[False]])
-    assert d == _BoolLiteral[True]
+    assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[Literal[False] | Literal[True]])
-    assert d == _BoolLiteral[True]
+    assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[Literal[True] | Never])
     assert d == _BoolLiteral[True]
     d = eval_typing(LiteralGenericToLiteral[Never | Literal[True]])
@@ -1711,15 +1711,31 @@ def test_eval_bool_02():
     d = eval_typing(LiteralGenericToLiteral[Never | Literal[False]])
     assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[Literal[True] | int])
-    assert d == _BoolLiteral[True]
+    assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[int | Literal[True]])
-    assert d == _BoolLiteral[True]
+    assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[Literal[False] | int])
     assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[int | Literal[False]])
     assert d == _BoolLiteral[False]
     d = eval_typing(LiteralGenericToLiteral[int | str])
     assert d == _BoolLiteral[False]
+    d = eval_typing(LiteralGenericToLiteral[Literal[True, False]])
+    assert d == _BoolLiteral[False]
+    d = eval_typing(LiteralGenericToLiteral[bool])
+    assert d == _BoolLiteral[False]
+
+
+def test_eval_is_assignable_any_01():
+    assert eval_typing(IsAssignable[int, Any])
+    assert eval_typing(IsAssignable[Any, int])
+    assert eval_typing(IsAssignable[int | str, Any])
+    assert eval_typing(IsAssignable[Any, int | str])
+    assert eval_typing(IsAssignable[Literal[True], Any])
+    assert eval_typing(IsAssignable[Never, Any])
+    assert eval_typing(IsAssignable[Any, Never])
+    assert eval_typing(IsEquivalent[Any, Literal[True]])
+    assert eval_typing(LiteralGenericToLiteral[Any]) == Literal[True]
 
 
 def test_eval_bool_03():
@@ -1767,7 +1783,7 @@ def test_eval_cond_01():
     assert eval_typing(_Cond[Literal[False], int, str]) is str
     assert eval_typing(_Cond[Never, int, str]) is str
     assert eval_typing(_Cond[int, int, str]) is str
-    assert eval_typing(_Cond[Literal[False] | Literal[True], int, str]) is int
+    assert eval_typing(_Cond[Literal[False] | Literal[True], int, str]) is str
 
     assert eval_typing(OnlyIntToSetCond[int]) == set[int]
     assert eval_typing(OnlyIntToSetCond[str]) is str
