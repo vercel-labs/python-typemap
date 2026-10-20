@@ -320,7 +320,7 @@ class NewTypedDict[*T]:
     pass
 
 
-class UpdateClass[*Ms]:
+class UpdateClass[Cls, *Ms]:
     pass
 
 

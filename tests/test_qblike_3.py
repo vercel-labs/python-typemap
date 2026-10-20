@@ -137,6 +137,7 @@ class Table[name: str]:
     def __init_subclass__[T](
         cls: type[T],
     ) -> UpdateClass[
+        T,
         *[
             Member[
                 m.name,

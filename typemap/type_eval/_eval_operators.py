@@ -307,7 +307,13 @@ def _get_update_class_members(
             _typing_inspect.is_generic_alias(evaled_ret)
             and typing.get_origin(evaled_ret) is UpdateClass
         ):
-            return _eval_args(typing.get_args(evaled_ret), ctx)
+            target, *ms = typing.get_args(evaled_ret)
+            if target != box.alias_type():
+                raise TypeMapError(
+                    f"UpdateClass: expected {box.alias_type()!r} as the "
+                    f"class to update, got {target!r}"
+                )
+            return _eval_args(ms, ctx)
 
     return None
 

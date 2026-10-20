@@ -60,8 +60,8 @@ wheels = [
 
 [[package]]
 name = "mypy"
-version = "1.20.0+dev.711205f297cfe94c998a39b6b252add796378cb1"
-source = { git = "https://github.com/msullivan/mypy-typemap?rev=711205f297cfe94c998a39b6b252add796378cb1#711205f297cfe94c998a39b6b252add796378cb1" }
+version = "1.20.0+dev.52ff489876c8208db3567a381c50b3db39260b0c"
+source = { git = "https://github.com/msullivan/mypy-typemap?rev=52ff489876c8208db3567a381c50b3db39260b0c#52ff489876c8208db3567a381c50b3db39260b0c" }
 dependencies = [
     { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
     { name = "mypy-extensions" },
@@ -172,7 +172,7 @@ test = [
 
 [package.metadata.requires-dev]
 test = [
-    { name = "mypy", git = "https://github.com/msullivan/mypy-typemap?rev=711205f297cfe94c998a39b6b252add796378cb1" },
+    { name = "mypy", git = "https://github.com/msullivan/mypy-typemap?rev=52ff489876c8208db3567a381c50b3db39260b0c" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "ruff" },
 ]
