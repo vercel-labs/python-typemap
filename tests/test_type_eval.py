@@ -2280,9 +2280,10 @@ def test_update_class_members_01():
         a1: int  # not overridden
         a2: int  # overridden
 
-        def __init_subclass__(
-            cls,
+        def __init_subclass__[T](
+            cls: type[T],
         ) -> UpdateClass[
+            T,
             Member[Literal["a2"], str],
             Member[Literal["b1"], str],
             Member[Literal["b2"], str],
@@ -2309,6 +2310,7 @@ def test_update_class_members_01():
     )
 
     # Members
+    (T,) = A.__dict__["__init_subclass__"].__func__.__type_params__
     members = eval_typing(Members[B])
     assert (
         members
@@ -2320,13 +2322,17 @@ def test_update_class_members_01():
             Member[Literal["b0"], int, Never, Never, B],
             Member[
                 Literal["__init_subclass__"],
-                classmethod[
-                    A,
-                    Params[()],
-                    UpdateClass[
-                        Member[Literal["a2"], str],
-                        Member[Literal["b1"], str],
-                        Member[Literal["b2"], str],
+                GenericCallable[
+                    tuple[T],
+                    classmethod[
+                        T,
+                        Params[()],
+                        UpdateClass[
+                            T,
+                            Member[Literal["a2"], str, Never, Never, Never],
+                            Member[Literal["b1"], str, Never, Never, Never],
+                            Member[Literal["b2"], str, Never, Never, Never],
+                        ],
                     ],
                 ],
                 Literal["ClassVar"],
@@ -2383,6 +2389,7 @@ def test_update_class_members_02():
         def __init_subclass__[T](
             cls: type[T],
         ) -> UpdateClass[
+            T,
             Member[Literal["a2"], str],
             Member[Literal["b1"], str],
             Member[Literal["b2"], str],
@@ -2453,7 +2460,7 @@ def test_update_class_members_02():
 
 
 type AttrsAsSets[T] = UpdateClass[
-    *[Member[m.name, set[m.type]] for m in Attrs[T]]
+    T, *[Member[m.name, set[m.type]] for m in Attrs[T]]
 ]
 
 
@@ -2700,25 +2707,25 @@ def test_update_class_members_09():
     class A[V]:
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[Member[Literal["a"], V], *Attrs[T]]:
+        ) -> UpdateClass[T, Member[Literal["a"], V], *Attrs[T]]:
             super().__init_subclass__()
 
     class B[V](A[int]):
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[Member[Literal["b"], V], *Attrs[T]]:
+        ) -> UpdateClass[T, Member[Literal["b"], V], *Attrs[T]]:
             super().__init_subclass__()
 
     class C[V](B[str]):
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[Member[Literal["c"], V], *Attrs[T]]:
+        ) -> UpdateClass[T, Member[Literal["c"], V], *Attrs[T]]:
             super().__init_subclass__()
 
     class D[V](C[float]):
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[Member[Literal["d"], V]]:
+        ) -> UpdateClass[T, Member[Literal["d"], V]]:
             super().__init_subclass__()
 
     attrs = eval_typing(Attrs[A[int]])
@@ -2757,6 +2764,7 @@ def test_update_class_members_10():
         def __init_subclass__[T](
             cls: type[T],
         ) -> UpdateClass[
+            T,
             Member[Literal["b"], B[str]],
             Member[Literal["c"], C[float]],
             Member[Literal["d"], D[bool]],
@@ -2791,7 +2799,7 @@ def test_update_class_members_11():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[*Members[T]]:
+        ) -> UpdateClass[T, *Members[T]]:
             super().__init_subclass__()
 
         def f(self) -> int: ...
@@ -2883,7 +2891,7 @@ def test_update_class_inheritance_02():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[*[Member[m.name, list[m.type]] for m in Attrs[T]]]:
+        ) -> UpdateClass[T, *[Member[m.name, list[m.type]] for m in Attrs[T]]]:
             super().__init_subclass__()
 
     class C:
@@ -2891,7 +2899,7 @@ def test_update_class_inheritance_02():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[*[Member[m.name, tuple[m.type]] for m in Attrs[T]]]:
+        ) -> UpdateClass[T, *[Member[m.name, tuple[m.type]] for m in Attrs[T]]]:
             super().__init_subclass__()
 
     class D(B, C):
@@ -2915,7 +2923,7 @@ def test_update_class_is_assignable_01():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[()]:
+        ) -> UpdateClass[T]:
             super().__init_subclass__()
 
     class B(A):
@@ -2937,7 +2945,7 @@ def test_update_class_getarg_01():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[()]:
+        ) -> UpdateClass[T]:
             super().__init_subclass__()
 
     class B[Y](A[int, Y]):
@@ -2959,7 +2967,7 @@ def test_update_class_empty_01():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[()]:
+        ) -> UpdateClass[T]:
             super().__init_subclass__()
 
     class B(A):
@@ -2984,7 +2992,7 @@ def test_update_class_never_removes():
 
         def __init_subclass__[T](
             cls: type[T],
-        ) -> UpdateClass[Member[Literal["b"], Never],]:
+        ) -> UpdateClass[T, Member[Literal["b"], Never]]:
             super().__init_subclass__()
 
     class B(A):
@@ -2999,6 +3007,23 @@ def test_update_class_never_removes():
             Member[Literal["d"], bool, Never, Never, B],
         ]
     )
+
+
+def test_update_class_wrong_class():
+    # The first argument to UpdateClass must be the class being updated
+    class A:
+        a: int
+
+        def __init_subclass__[T](
+            cls: type[T],
+        ) -> UpdateClass[A, Member[Literal["b"], str]]:
+            super().__init_subclass__()
+
+    class B(A):
+        c: int
+
+    with pytest.raises(TypeMapError, match="UpdateClass"):
+        eval_typing(Attrs[B])
 
 
 ##############

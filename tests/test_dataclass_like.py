@@ -97,6 +97,7 @@ type AddInit[T] = typing.NewProtocol[
 def dataclass_ish[T](
     cls: type[T],
 ) -> typing.UpdateClass[
+    T,
     # Add the computed __init__ function
     InitFnType[T],
 ]:
@@ -114,6 +115,7 @@ class Model:
     def __init_subclass__[T](
         cls: type[T],
     ) -> typing.UpdateClass[
+        T,
         # Add the computed __init__ function
         InitFnType[T],
     ]:
@@ -152,6 +154,6 @@ def test_dataclass_like_1():
             age: int | None = Field(default=None)
             secret_name: str
             @classmethod
-            def __init_subclass__[T](cls: type[T]) -> typemap.typing.UpdateClass[InitFnType[T]]: ...
+            def __init_subclass__[T](cls: type[T]) -> typemap.typing.UpdateClass[T, InitFnType[T]]: ...
             def __init__(self: Self, *, id: int | None = None, name: str, age: int | None = None, secret_name: str) -> None: ...
     """)

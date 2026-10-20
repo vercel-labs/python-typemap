@@ -13,7 +13,7 @@ include = ["typemap", "typemap.*", "typemap_extensions"]
 test = [
     "pytest>=7.0",
     "ruff",
-    "mypy @ git+https://github.com/msullivan/mypy-typemap@711205f297cfe94c998a39b6b252add796378cb1",
+    "mypy @ git+https://github.com/msullivan/mypy-typemap@52ff489876c8208db3567a381c50b3db39260b0c",
 ]
 
 [tool.uv]
